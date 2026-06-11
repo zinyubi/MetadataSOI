@@ -2524,7 +2524,7 @@ def extract_layer_metadata(layer, source_path=""):
 
 
 
-def write_metadata_xml(values, output_xml_path):
+def write_iso19115_3_xml(values, output_xml_path):
 
     """Write ISO 19115-1 / ISO 19115-3 style XML using proper namespaces.
 
@@ -3416,6 +3416,288 @@ def write_metadata_xml(values, output_xml_path):
 
 
 
+def write_metadata_xml(values, output_xml_path):
+    """Write QGIS-importable ISO 19139 metadata and preserve every GUI value.
+
+    QGIS's ISO import/export workflow uses the ISO 19115:2003 / ISO 19139
+    ``gmd:MD_Metadata`` encoding. The complete SOI form is additionally retained
+    in extension blocks so this tool can round-trip fields which have no direct
+    ISO 19139/QGIS metadata-editor equivalent.
+    """
+    ns = {
+        "gmd": "http://www.isotc211.org/2005/gmd",
+        "gco": "http://www.isotc211.org/2005/gco",
+        "gml": "http://www.opengis.net/gml",
+        "xlink": "http://www.w3.org/1999/xlink",
+        "xsi": "http://www.w3.org/2001/XMLSchema-instance",
+    }
+    for prefix, uri in ns.items():
+        ET.register_namespace(prefix, uri)
+
+    def q(prefix, tag):
+        return f"{{{ns[prefix]}}}{tag}"
+
+    label_to_id = {field["label"]: field["id"] for field in SOI_TEMPLATE_FIELDS}
+
+    def get(label, default=""):
+        field_id = label_to_id.get(label)
+        return safe_text(values.get(field_id, default)) if field_id else safe_text(default)
+
+    def character(parent, tag, value):
+        if not safe_text(value):
+            return None
+        wrapper = ET.SubElement(parent, q("gmd", tag))
+        text = ET.SubElement(wrapper, q("gco", "CharacterString"))
+        text.text = safe_text(value)
+        return wrapper
+
+    def code(parent, tag, code_tag, value, code_list):
+        if not safe_text(value):
+            return None
+        wrapper = ET.SubElement(parent, q("gmd", tag))
+        value_element = ET.SubElement(wrapper, q("gmd", code_tag))
+        value_element.set("codeList", code_list)
+        value_element.set("codeListValue", safe_text(value))
+        return wrapper
+
+    def date_value(parent, tag, value):
+        if not safe_text(value):
+            return None
+        wrapper = ET.SubElement(parent, q("gmd", tag))
+        value = safe_text(value)
+        date_tag = "DateTime" if "T" in value else "Date"
+        date_element = ET.SubElement(wrapper, q("gco", date_tag))
+        date_element.text = value
+        return wrapper
+
+    def decimal(parent, tag, value):
+        if not safe_text(value):
+            return None
+        wrapper = ET.SubElement(parent, q("gmd", tag))
+        number = ET.SubElement(wrapper, q("gco", "Decimal"))
+        number.text = safe_text(value)
+        return wrapper
+
+    role_list = (
+        "http://standards.iso.org/ittf/PubliclyAvailableStandards/"
+        "ISO_19139_Schemas/resources/codelist/ML_gmxCodelists.xml#CI_RoleCode"
+    )
+
+    def responsible_party(parent, property_tag, role, organisation="", individual="", position="", email="", voice="", online=""):
+        if not any(safe_text(value) for value in (organisation, individual, position, email, voice, online)):
+            return None
+        wrapper = ET.SubElement(parent, q("gmd", property_tag))
+        party = ET.SubElement(wrapper, q("gmd", "CI_ResponsibleParty"))
+        character(party, "individualName", individual)
+        character(party, "organisationName", organisation)
+        character(party, "positionName", position)
+        if email or voice or online:
+            info_wrapper = ET.SubElement(party, q("gmd", "contactInfo"))
+            info = ET.SubElement(info_wrapper, q("gmd", "CI_Contact"))
+            if voice:
+                phone_wrapper = ET.SubElement(info, q("gmd", "phone"))
+                phone = ET.SubElement(phone_wrapper, q("gmd", "CI_Telephone"))
+                character(phone, "voice", voice)
+            if email:
+                address_wrapper = ET.SubElement(info, q("gmd", "address"))
+                address = ET.SubElement(address_wrapper, q("gmd", "CI_Address"))
+                character(address, "electronicMailAddress", email)
+            if online:
+                online_wrapper = ET.SubElement(info, q("gmd", "onlineResource"))
+                resource = ET.SubElement(online_wrapper, q("gmd", "CI_OnlineResource"))
+                linkage = ET.SubElement(resource, q("gmd", "linkage"))
+                url = ET.SubElement(linkage, q("gmd", "URL"))
+                url.text = safe_text(online)
+        code(party, "role", "CI_RoleCode", role or "pointOfContact", role_list)
+        return wrapper
+
+    root = ET.Element(q("gmd", "MD_Metadata"))
+    root.set(
+        q("xsi", "schemaLocation"),
+        "http://www.isotc211.org/2005/gmd "
+        "http://schemas.opengis.net/iso/19139/20070417/gmd/gmd.xsd",
+    )
+
+    identifier = get("metadataIdentifier · code") or str(uuid.uuid4())
+    character(root, "fileIdentifier", identifier)
+    code(root, "language", "LanguageCode", get("defaultLocale · language") or "eng", "http://www.loc.gov/standards/iso639-2/")
+    code(
+        root, "characterSet", "MD_CharacterSetCode", "utf8",
+        "http://standards.iso.org/ittf/PubliclyAvailableStandards/ISO_19139_Schemas/"
+        "resources/codelist/ML_gmxCodelists.xml#MD_CharacterSetCode",
+    )
+    code(
+        root, "hierarchyLevel", "MD_ScopeCode", get("metadataScope · resourceScope") or "dataset",
+        "http://www.isotc211.org/2005/resources/Codelist/gmxCodelists.xml#MD_ScopeCode",
+    )
+    responsible_party(
+        root, "contact", get("contact · role") or "pointOfContact",
+        get("contact · party name"), "", "",
+        get("contact · electronicMailAddress"), "", get("contact · onlineResource linkage"),
+    )
+    date_value(root, "dateStamp", get("dateInfo · date") or now_iso())
+    character(root, "metadataStandardName", "ISO 19115:2003/19139")
+    character(root, "metadataStandardVersion", "1.0")
+
+    crs_code = get("Horizontal CRS · code")
+    if crs_code:
+        reference_wrapper = ET.SubElement(root, q("gmd", "referenceSystemInfo"))
+        reference = ET.SubElement(reference_wrapper, q("gmd", "MD_ReferenceSystem"))
+        identifier_wrapper = ET.SubElement(reference, q("gmd", "referenceSystemIdentifier"))
+        rs_identifier = ET.SubElement(identifier_wrapper, q("gmd", "RS_Identifier"))
+        character(rs_identifier, "code", crs_code)
+
+    identification_wrapper = ET.SubElement(root, q("gmd", "identificationInfo"))
+    identification = ET.SubElement(identification_wrapper, q("gmd", "MD_DataIdentification"))
+    citation_wrapper = ET.SubElement(identification, q("gmd", "citation"))
+    citation = ET.SubElement(citation_wrapper, q("gmd", "CI_Citation"))
+    character(citation, "title", get("citation · title") or get("File name"))
+    citation_date = get("citation · date")
+    if citation_date:
+        date_wrapper = ET.SubElement(citation, q("gmd", "date"))
+        ci_date = ET.SubElement(date_wrapper, q("gmd", "CI_Date"))
+        date_value(ci_date, "date", citation_date)
+        code(
+            ci_date, "dateType", "CI_DateTypeCode", get("citation · dateType") or "publication",
+            "http://www.isotc211.org/2005/resources/codeList.xml#CI_DateTypeCode",
+        )
+    character(identification, "abstract", get("abstract") or get("Brief description") or "No abstract provided.")
+    character(identification, "purpose", get("purpose"))
+    responsible_party(
+        identification, "pointOfContact", get("pointOfContact · role") or "pointOfContact",
+        get("pointOfContact · party · organisation name"),
+        get("pointOfContact · party · individual name"),
+        get("pointOfContact · party · positionName"),
+        get("pointOfContact · electronicMailAddress"),
+        get("pointOfContact · voice"), get("pointOfContact · onlineResource linkage"),
+    )
+    code(identification, "language", "LanguageCode", get("defaultLocale · language") or "eng", "http://www.loc.gov/standards/iso639-2/")
+    code(
+        identification, "characterSet", "MD_CharacterSetCode", "utf8",
+        "http://standards.iso.org/ittf/PubliclyAvailableStandards/ISO_19139_Schemas/"
+        "resources/codelist/ML_gmxCodelists.xml#MD_CharacterSetCode",
+    )
+
+    topic = get("topicCategory")
+    if topic:
+        for topic_value in re.split(r"[;,]", topic):
+            if safe_text(topic_value):
+                wrapper = ET.SubElement(identification, q("gmd", "topicCategory"))
+                topic_element = ET.SubElement(wrapper, q("gmd", "MD_TopicCategoryCode"))
+                topic_element.text = safe_text(topic_value).replace(" ", "")
+
+    keyword_groups = (
+        ("keyword · theme", "theme"), ("keyword · place", "place"),
+        ("keyword · product", "theme"), ("keyword · discipline", "discipline"),
+    )
+    for label, keyword_type in keyword_groups:
+        raw_keywords = get(label)
+        keywords = [safe_text(item) for item in re.split(r"[;,]", raw_keywords) if safe_text(item)]
+        if keywords:
+            wrapper = ET.SubElement(identification, q("gmd", "descriptiveKeywords"))
+            md_keywords = ET.SubElement(wrapper, q("gmd", "MD_Keywords"))
+            for keyword in keywords:
+                character(md_keywords, "keyword", keyword)
+            code(
+                md_keywords, "type", "MD_KeywordTypeCode", keyword_type,
+                "http://www.isotc211.org/2005/resources/codeList.xml#MD_KeywordTypeCode",
+            )
+
+    rights = get("useLimitation") or get("otherConstraints")
+    if rights or get("accessConstraints") or get("useConstraints"):
+        wrapper = ET.SubElement(identification, q("gmd", "resourceConstraints"))
+        constraints = ET.SubElement(wrapper, q("gmd", "MD_LegalConstraints"))
+        character(constraints, "useLimitation", get("useLimitation"))
+        code(
+            constraints, "accessConstraints", "MD_RestrictionCode", get("accessConstraints"),
+            "http://www.isotc211.org/2005/resources/codeList.xml#MD_RestrictionCode",
+        )
+        code(
+            constraints, "useConstraints", "MD_RestrictionCode", get("useConstraints"),
+            "http://www.isotc211.org/2005/resources/codeList.xml#MD_RestrictionCode",
+        )
+        character(constraints, "otherConstraints", get("otherConstraints"))
+
+    bounds = (
+        get("geographicElement · westBoundLongitude"),
+        get("geographicElement · eastBoundLongitude"),
+        get("geographicElement · southBoundLatitude"),
+        get("geographicElement · northBoundLatitude"),
+    )
+    if any(bounds):
+        extent_wrapper = ET.SubElement(identification, q("gmd", "extent"))
+        extent = ET.SubElement(extent_wrapper, q("gmd", "EX_Extent"))
+        geographic_wrapper = ET.SubElement(extent, q("gmd", "geographicElement"))
+        box = ET.SubElement(geographic_wrapper, q("gmd", "EX_GeographicBoundingBox"))
+        for tag, value in zip(
+            ("westBoundLongitude", "eastBoundLongitude", "southBoundLatitude", "northBoundLatitude"), bounds
+        ):
+            decimal(box, tag, value)
+
+    format_name = get("distributionFormat · name")
+    online_url = get("onLine · linkage")
+    if format_name or online_url:
+        distribution_wrapper = ET.SubElement(root, q("gmd", "distributionInfo"))
+        distribution = ET.SubElement(distribution_wrapper, q("gmd", "MD_Distribution"))
+        if format_name:
+            format_wrapper = ET.SubElement(distribution, q("gmd", "distributionFormat"))
+            md_format = ET.SubElement(format_wrapper, q("gmd", "MD_Format"))
+            character(md_format, "name", format_name)
+            character(md_format, "version", get("distributionFormat · version") or "unknown")
+        responsible_party(
+            distribution, "distributor", "distributor",
+            get("distributor · organisation"), "", "",
+            get("distributor · electronicMailAddress"), "", "",
+        )
+        if online_url:
+            transfer_wrapper = ET.SubElement(distribution, q("gmd", "transferOptions"))
+            transfer = ET.SubElement(transfer_wrapper, q("gmd", "MD_DigitalTransferOptions"))
+            online_wrapper = ET.SubElement(transfer, q("gmd", "onLine"))
+            online = ET.SubElement(online_wrapper, q("gmd", "CI_OnlineResource"))
+            linkage = ET.SubElement(online, q("gmd", "linkage"))
+            url = ET.SubElement(linkage, q("gmd", "URL"))
+            url.text = online_url
+            character(online, "protocol", get("onLine · protocol"))
+            character(online, "name", get("onLine · name"))
+            character(online, "description", get("onLine · description"))
+
+    lineage_statement = get("resourceLineage · statement")
+    if lineage_statement:
+        quality_wrapper = ET.SubElement(root, q("gmd", "dataQualityInfo"))
+        quality = ET.SubElement(quality_wrapper, q("gmd", "DQ_DataQuality"))
+        lineage_wrapper = ET.SubElement(quality, q("gmd", "lineage"))
+        lineage = ET.SubElement(lineage_wrapper, q("gmd", "LI_Lineage"))
+        character(lineage, "statement", lineage_statement)
+
+    # QGIS ignores these unqualified extension blocks, while this tool uses them
+    # to restore every ISO/SOI GUI field without loss.
+    soi_block = ET.SubElement(root, "SOI_FieldValues")
+    for field in SOI_TEMPLATE_FIELDS:
+        value = safe_text(values.get(field["id"], ""))
+        if value:
+            field_element = ET.SubElement(soi_block, "Field")
+            field_element.set("id", field["id"])
+            field_element.set("label", field["label"])
+            field_element.text = value
+
+    interop_block = ET.SubElement(root, "SOI_Interop")
+    for key, value in (values.get("_interop", {}) or {}).items():
+        if safe_text(value):
+            child = ET.SubElement(interop_block, xml_safe_tag(key))
+            child.text = safe_text(value)
+
+    inventory_block = ET.SubElement(root, "SOI_Inventory")
+    for key, value in (values.get("_soi_inventory", {}) or {}).items():
+        if safe_text(value):
+            field_element = ET.SubElement(inventory_block, "Field")
+            field_element.set("name", safe_text(key))
+            field_element.text = safe_text(value)
+
+    tree = ET.ElementTree(root)
+    ET.indent(tree, space="  ", level=0)
+    tree.write(output_xml_path, encoding="utf-8", xml_declaration=True)
+
+
 # The visible SOI inventory form intentionally contains only registry fields that
 # are not already represented by the ISO metadata tabs. Technical identity and
 # timestamp columns remain in the workbook for safe upserts and change checks.
@@ -3947,7 +4229,7 @@ class SOIMetadataDialog(QDialog):
 
         super().__init__()
 
-        self.setWindowTitle("SOI ISO 19115-1 Metadata XML Generator - QGIS")
+        self.setWindowTitle("SOI ISO Metadata XML Generator - QGIS (ISO 19139 Compatible)")
 
         self.resize(1200, 860)
 
@@ -4108,7 +4390,7 @@ class SOIMetadataDialog(QDialog):
 
 
 
-        header = QLabel("SOI ISO 19115-1 Metadata XML Generator — QGIS (SOI Inventory Aligned v13)")
+        header = QLabel("SOI ISO 19139 Metadata XML Generator — QGIS (SOI Inventory Aligned)")
 
         header.setAlignment(Qt.AlignCenter)
 

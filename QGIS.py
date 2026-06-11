@@ -45,6 +45,8 @@ from qgis.PyQt.QtXml import QDomDocument
 
 from qgis.PyQt.QtWidgets import (
 
+    QApplication,
+
     QDialog,
 
     QVBoxLayout,
@@ -4431,7 +4433,15 @@ class SOIMetadataDialog(QDialog):
 
         self.setWindowTitle("SOI ISO Metadata XML Generator - QGIS (ISO 19139 Compatible)")
 
-        self.resize(1200, 860)
+        app = QApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+        if screen is not None:
+            available = screen.availableGeometry()
+            window_width = max(320, min(1200, available.width() - 40))
+            window_height = max(300, min(860, available.height() - 40))
+            self.resize(window_width, window_height)
+        else:
+            self.resize(1000, 720)
 
         # Global UI style.
 
@@ -4835,6 +4845,45 @@ class SOIMetadataDialog(QDialog):
         self._initializing = False
 
 
+
+    def show_scrollable_report(self, title, message, warning=False):
+        """Show a bounded report dialog which cannot grow beyond the screen."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+
+        heading = QLabel("⚠ " + title if warning else title)
+        heading.setWordWrap(True)
+        heading.setStyleSheet(
+            "font-weight:bold; color:#b26a00; padding:4px;" if warning
+            else "font-weight:bold; color:#1f4e79; padding:4px;"
+        )
+        layout.addWidget(heading)
+
+        report = QTextEdit()
+        report.setReadOnly(True)
+        report.setPlainText(safe_text(message))
+        report.setLineWrapMode(QTextEdit.WidgetWidth)
+        layout.addWidget(report, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        app = QApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = max(320, min(760, available.width() - 80))
+            height = max(280, min(640, available.height() - 80))
+            dialog.resize(width, height)
+        else:
+            dialog.resize(650, 520)
+        dialog.exec_()
 
     def create_metadata_tabs(self):
 
@@ -6215,7 +6264,7 @@ class SOIMetadataDialog(QDialog):
 
                     msg += f"\n... and {len(changes) - 20} more changes."
 
-                QMessageBox.warning(self, "XML Loaded - Differences Found", msg)
+                self.show_scrollable_report("XML Loaded - Differences Found", msg, warning=True)
 
             else:
 
@@ -6513,7 +6562,7 @@ class SOIMetadataDialog(QDialog):
 
                 msg += f"\n... and {len(changes) - 25} more changed fields."
 
-            QMessageBox.warning(self, "Changes Detected", msg)
+            self.show_scrollable_report("Changes Detected", msg, warning=True)
 
         else:
 

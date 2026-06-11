@@ -3519,23 +3519,41 @@ def normalized_source_path(source):
 
 
 def source_layer_name(source, fallback=""):
+    """Return only an intrinsic sublayer selector, not a QGIS display name.
 
-    """Resolve a stable layer name, preferring layername over volatile layerid."""
-
-    _base, params = split_qgis_source(source)
-
+    A standalone file represents the same dataset whether opened from the QGIS
+    project or browsed from the file system. Its project layer can be renamed,
+    so ``fallback`` must not become part of that dataset's identity. Container
+    sources still need their real internal layer/subdataset selector.
+    """
+    base, params = split_qgis_source(source)
     for key, value in params:
-
         if key == "layername" and value:
-
             return value.strip().casefold()
 
+    source_text = safe_text(source).strip()
+    # GDAL raster subdataset URIs do not use QGIS's |layername= syntax.
+    # Keep the final subdataset name so two rasters in one GDB stay distinct.
+    gdb_match = re.match(r'^[A-Za-z0-9_]+:"[^"]+\.gdb":(.+)$', source_text, re.IGNORECASE)
+    if gdb_match:
+        return gdb_match.group(1).strip().strip('"').casefold()
+
+    normalized_base = safe_text(base).strip().lower()
+    standalone_extensions = {
+        ".shp", ".tif", ".tiff", ".img", ".jp2", ".vrt", ".geojson",
+        ".json", ".kml", ".kmz", ".csv", ".tab", ".mif", ".nc",
+    }
+    if os.path.splitext(normalized_base)[1] in standalone_extensions:
+        return ""
+
+    # Non-file providers and containers without an explicit selector still use
+    # the supplied provider layer name as their best available identity.
     return safe_text(fallback).strip().casefold()
 
 
 def canonical_dataset_key(source, layer_name=""):
 
-    """Return ``normalized source::layer`` independent of case and layerid."""
+    """Return a stable physical-source key plus any intrinsic sublayer selector."""
 
     source_key = normalized_source_path(source)
 

@@ -6,17 +6,14 @@
 
 import os
 
-import csv
 
 import uuid
 
 import hashlib
 
-import zipfile
 
 import re
 
-from copy import deepcopy
 
 import xml.etree.ElementTree as ET
 
@@ -2186,152 +2183,6 @@ def is_multiline_field(label, iso_path):
 
 
 
-def extract_raster_metadata(file_path):
-
-    result = {
-
-        "valid": False,
-
-        "file_path": file_path,
-
-        "File name": os.path.basename(file_path),
-
-        "file_size_mb": "",
-
-        "provider": "",
-
-        "width": "",
-
-        "height": "",
-
-        "bands": "",
-
-        "crs_authid": "",
-
-        "crs_description": "",
-
-        "extent_layer_crs": "",
-
-        "west": "",
-
-        "east": "",
-
-        "south": "",
-
-        "north": "",
-
-        "pixel_width": "",
-
-        "pixel_height": "",
-
-        "number_of_dimensions": "2",
-
-        "cell_geometry": "area",
-
-    }
-
-
-
-    if not os.path.exists(file_path):
-
-        return result
-
-
-
-    result["file_size_mb"] = round(os.path.getsize(file_path) / (1024 * 1024), 3)
-
-
-
-    layer = QgsRasterLayer(file_path, os.path.basename(file_path))
-
-    if not layer.isValid():
-
-        return result
-
-
-
-    result["valid"] = True
-
-    result["provider"] = layer.providerType()
-
-    result["width"] = layer.width()
-
-    result["height"] = layer.height()
-
-    result["bands"] = layer.bandCount()
-
-
-
-    crs = layer.crs()
-
-    result["crs_authid"] = crs.authid()
-
-    result["crs_description"] = crs.description()
-
-
-
-    extent = layer.extent()
-
-    result["extent_layer_crs"] = (
-
-        f"xMin={extent.xMinimum()}, yMin={extent.yMinimum()}, "
-
-        f"xMax={extent.xMaximum()}, yMax={extent.yMaximum()}"
-
-    )
-
-
-
-    if layer.width() > 0:
-
-        result["pixel_width"] = abs(extent.width() / layer.width())
-
-    if layer.height() > 0:
-
-        result["pixel_height"] = abs(extent.height() / layer.height())
-
-
-
-    # ISO bounding box is usually stored in geographic coordinates.
-
-    # Transform extent to EPSG:4326 where possible.
-
-    try:
-
-        dest_crs = QgsCoordinateReferenceSystem("EPSG:4326")
-
-        transform = QgsCoordinateTransform(crs, dest_crs, QgsProject.instance())
-
-        geo_extent = transform.transformBoundingBox(extent)
-
-        result["west"] = geo_extent.xMinimum()
-
-        result["east"] = geo_extent.xMaximum()
-
-        result["south"] = geo_extent.yMinimum()
-
-        result["north"] = geo_extent.yMaximum()
-
-    except Exception:
-
-        # fallback to native CRS extent
-
-        result["west"] = extent.xMinimum()
-
-        result["east"] = extent.xMaximum()
-
-        result["south"] = extent.yMinimum()
-
-        result["north"] = extent.yMaximum()
-
-
-
-    return result
-
-
-
-
-
 def list_ogr_sublayers(container_path):
 
     """List vector layers inside GeoPackage / FileGDB using GDAL/OGR when available."""
@@ -3676,7 +3527,13 @@ SOI_INVENTORY_HEADERS = [
 
 SYSTEM_INVENTORY_HEADERS = [
 
-    "Dataset_ID", "Dataset_Key", "Dataset_Hash", "Dataset_Title", "File_Name", "Data_Path", "Metadata_XML_Path",
+    "Dataset_GUID", "Dataset_Hash", "Dataset_Name", "Dataset_Source", "Layer_Name",
+
+    "Dataset_Path", "XML_Path", "Last_Modified",
+
+    # Legacy aliases are retained for compatibility with existing workbooks.
+
+    "Dataset_ID", "Dataset_Key", "Dataset_Title", "File_Name", "Data_Path", "Metadata_XML_Path",
 
     "Metadata_Date", "CRS", "West", "East", "South", "North", "QGIS_Project",
 
@@ -3700,69 +3557,88 @@ SOI_INVENTORY_FIELD_COUNT = len(SOI_INVENTORY_HEADERS)
 
 
 
-def normalize_path(path):
-
-    path = safe_text(path).replace("\\", os.sep)
-
-    if not path:
-
-        return ""
-
-    base, suffix = split_qgis_source(path)
-
-    try:
-
-        base_norm = os.path.normcase(os.path.abspath(base)) if base else ""
-
-    except Exception:
-
-        base_norm = os.path.normcase(base)
-
-    return base_norm + suffix.lower()
-
-
 def split_qgis_source(source):
 
-    """Return filesystem part and stable QGIS provider suffix from a layer source string."""
+    """Return the base source and QGIS provider parameters."""
 
-    source = safe_text(source)
+    source = safe_text(source).strip()
 
     if "|" not in source:
 
-        return source, ""
+        return source, []
 
-    base, suffix = source.split("|", 1)
+    base, raw_params = source.split("|", 1)
 
-    return base, "|" + suffix.strip()
+    params = []
+
+    for item in raw_params.split("|"):
+
+        key, sep, value = item.partition("=")
+
+        params.append((key.strip().lower(), value.strip() if sep else ""))
+
+    return base, params
+
+
+def normalized_source_path(source):
+
+    """Normalize only the physical/service source, excluding volatile layer selectors."""
+
+    base, _params = split_qgis_source(source)
+
+    base = safe_text(base).strip().replace("\\", "/")
+
+    if not base:
+
+        return ""
+
+    # Filesystem paths are made absolute; provider/service strings remain stable text.
+
+    looks_like_path = bool(re.match(r"^[A-Za-z]:/|^/|^\.\.?/", base)) or os.path.exists(base)
+
+    if looks_like_path:
+
+        try:
+
+            base = os.path.abspath(base).replace("\\", "/")
+
+        except Exception:
+
+            pass
+
+    base = re.sub(r"/+", "/", base.rstrip("/"))
+
+    return base.casefold()
+
+
+def source_layer_name(source, fallback=""):
+
+    """Resolve a stable layer name, preferring layername over volatile layerid."""
+
+    _base, params = split_qgis_source(source)
+
+    for key, value in params:
+
+        if key == "layername" and value:
+
+            return value.strip().casefold()
+
+    return safe_text(fallback).strip().casefold()
 
 
 def canonical_dataset_key(source, layer_name=""):
 
-    """Stable inventory key for files, GeoPackage/FileGDB layers and service layers."""
+    """Return ``normalized source::layer`` independent of case and layerid."""
 
-    source = safe_text(source)
+    source_key = normalized_source_path(source)
 
-    layer_name = safe_text(layer_name)
+    layer_key = source_layer_name(source, layer_name)
 
-    if not source and not layer_name:
+    if not source_key:
 
-        return ""
+        return layer_key
 
-    base, suffix = split_qgis_source(source)
-
-    try:
-
-        base = os.path.normcase(os.path.abspath(base)) if base else ""
-
-    except Exception:
-
-        base = os.path.normcase(base)
-
-    suffix = suffix.lower().replace("|layername=", "::layername=").replace("|layerid=", "::layerid=")
-
-    key = "::".join([x for x in [base, suffix.strip(":"), layer_name.lower()] if x])
-
-    return re.sub(r"\s+", " ", key.strip())
+    return source_key + ("::" + layer_key if layer_key else "")
 
 
 def dataset_hash(source, layer_name=""):
@@ -3770,6 +3646,13 @@ def dataset_hash(source, layer_name=""):
     key = canonical_dataset_key(source, layer_name)
 
     return hashlib.sha1(key.encode("utf-8")).hexdigest() if key else ""
+
+
+def normalize_path(path):
+
+    """Compatibility path normalizer used for legacy source/XML fallback matching."""
+
+    return canonical_dataset_key(path)
 
 
 def file_modified_iso(path):
@@ -3785,9 +3668,6 @@ def file_modified_iso(path):
         pass
 
     return ""
-
-
-
 
 
 def file_size_mb(path):
@@ -3806,626 +3686,193 @@ def file_size_mb(path):
 
 
 
-
-
-def col_letter(idx):
-
-    result = ""
-
-    while idx:
-
-        idx, rem = divmod(idx - 1, 26)
-
-        result = chr(65 + rem) + result
-
-    return result
-
-
-
+def inventory_worksheet(workbook):
+    """Return the named inventory worksheet, accepting legacy first-sheet files."""
+    if "Metadata Inventory" in workbook.sheetnames:
+        return workbook["Metadata Inventory"]
+    worksheet = workbook.active
+    worksheet.title = "Metadata Inventory"
+    return worksheet
 
 
 def read_inventory_xlsx(xlsx_path):
-
-    """Read first worksheet from an XLSX inventory.
-
-
-
-    Uses openpyxl when available because it is more reliable with files
-
-    subsequently edited/saved by Microsoft Excel or LibreOffice. Falls back
-
-    to the built-in ZIP/XML reader when openpyxl is not available in QGIS.
-
-    """
-
+    """Read the Metadata Inventory worksheet using openpyxl only."""
     if not os.path.exists(xlsx_path):
-
         return []
-
-
-
+    from openpyxl import load_workbook
     try:
-
-        from openpyxl import load_workbook
-
-        wb = load_workbook(xlsx_path, data_only=True)
-
-        ws = wb.active
-
-        rows = list(ws.iter_rows(values_only=True))
-
-        if not rows:
-
+        workbook = load_workbook(xlsx_path, data_only=True)
+        worksheet = inventory_worksheet(workbook)
+        rows = worksheet.iter_rows(values_only=True)
+        header_row = next(rows, None)
+        if not header_row:
+            workbook.close()
             return []
-
-        headers = [safe_text(h) for h in rows[0]]
-
+        headers = [safe_text(value) for value in header_row]
         records = []
-
-        for row in rows[1:]:
-
-            if not row or not any(safe_text(v) for v in row):
-
+        for values in rows:
+            if not values or not any(safe_text(value) for value in values):
                 continue
-
-            rec = {}
-
-            for i, h in enumerate(headers):
-
-                if h:
-
-                    rec[h] = safe_text(row[i]) if i < len(row) else ""
-
-            records.append(rec)
-
+            records.append({
+                header: safe_text(values[index]) if index < len(values) else ""
+                for index, header in enumerate(headers) if header
+            })
+        workbook.close()
         return records
-
-    except Exception:
-
-        pass
-
-
-
-    try:
-
-        with zipfile.ZipFile(xlsx_path, "r") as z:
-
-            shared_strings = []
-
-            if "xl/sharedStrings.xml" in z.namelist():
-
-                ss_root = ET.fromstring(z.read("xl/sharedStrings.xml"))
-
-                ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-
-                for si in ss_root.findall("a:si", ns):
-
-                    texts = [t.text or "" for t in si.findall(".//a:t", ns)]
-
-                    shared_strings.append("".join(texts))
-
-            sheet_name = "xl/worksheets/sheet1.xml"
-
-            if sheet_name not in z.namelist():
-
-                sheets = [n for n in z.namelist() if n.startswith("xl/worksheets/") and n.endswith(".xml")]
-
-                if not sheets:
-
-                    return []
-
-                sheet_name = sheets[0]
-
-            root = ET.fromstring(z.read(sheet_name))
-
-            ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-
-            rows = []
-
-            for row in root.findall(".//a:sheetData/a:row", ns):
-
-                values = []
-
-                current_col = 1
-
-                for c in row.findall("a:c", ns):
-
-                    ref = c.attrib.get("r", "")
-
-                    m = re.match(r"([A-Z]+)", ref)
-
-                    if m:
-
-                        col = 0
-
-                        for ch in m.group(1):
-
-                            col = col * 26 + (ord(ch) - 64)
-
-                        while current_col < col:
-
-                            values.append("")
-
-                            current_col += 1
-
-                    cell_type = c.attrib.get("t", "")
-
-                    value = ""
-
-                    if cell_type == "inlineStr":
-
-                        texts = [t.text or "" for t in c.findall(".//a:t", ns)]
-
-                        value = "".join(texts)
-
-                    else:
-
-                        v = c.find("a:v", ns)
-
-                        if v is not None and v.text is not None:
-
-                            if cell_type == "s":
-
-                                try:
-
-                                    value = shared_strings[int(v.text)]
-
-                                except Exception:
-
-                                    value = v.text
-
-                            else:
-
-                                value = v.text
-
-                    values.append(value)
-
-                    current_col += 1
-
-                rows.append(values)
-
-            if not rows:
-
-                return []
-
-            headers = [safe_text(h) for h in rows[0]]
-
-            records = []
-
-            for row in rows[1:]:
-
-                if not any(safe_text(v) for v in row):
-
-                    continue
-
-                rec = {}
-
-                for i, h in enumerate(headers):
-
-                    if h:
-
-                        rec[h] = safe_text(row[i]) if i < len(row) else ""
-
-                records.append(rec)
-
-            return records
-
     except Exception as exc:
-
         raise Exception(f"Could not read inventory Excel: {exc}")
 
 
+def style_inventory_worksheet(worksheet, headers):
+    """Apply lightweight formatting without rebuilding existing workbook content."""
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    header_font = Font(color="FFFFFF", bold=True)
+    thin = Side(style="thin", color="D9E2F3")
+    for cell in worksheet[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = Border(top=thin, bottom=thin, left=thin, right=thin)
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+    for index, header in enumerate(headers, start=1):
+        worksheet.column_dimensions[get_column_letter(index)].width = min(max(len(header) + 2, 14), 55)
 
 
-
-def write_inventory_xlsx(xlsx_path, records):
-
-    """Write inventory XLSX and fail loudly if the file cannot be saved.
-
-
-
-    Important fix:
-
-    Older versions could silently fail when openpyxl save failed or when the
-
-    workbook was open in Excel. This version writes to a temporary XLSX first,
-
-    verifies it, then replaces the original workbook. If Excel has locked the
-
-    file, the user gets a clear error instead of thinking the register updated.
-
-    """
-
+def write_inventory_xlsx(xlsx_path, records=None):
+    """Create an inventory workbook; existing workbooks are never rebuilt here."""
+    from openpyxl import Workbook
     xlsx_path = safe_text(xlsx_path)
-
     if not xlsx_path:
-
         raise Exception("Inventory Excel path is blank.")
-
     if not xlsx_path.lower().endswith(".xlsx"):
-
         xlsx_path = os.path.splitext(xlsx_path)[0] + ".xlsx"
-
-
-
     folder = os.path.dirname(xlsx_path)
-
-    if folder and not os.path.exists(folder):
-
+    if folder:
         os.makedirs(folder, exist_ok=True)
-
-
-
-    headers = INVENTORY_HEADERS[:]
-
-    for rec in records:
-
-        for key in rec.keys():
-
-            if key not in headers:
-
-                headers.append(key)
-
-
-
-    tmp_path = xlsx_path + ".tmp.xlsx"
-
-    backup_path = xlsx_path + ".bak"
-
-
-
-    try:
-
-        from openpyxl import Workbook, load_workbook
-
-        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-
-        from openpyxl.utils import get_column_letter
-
-
-
-        wb = Workbook()
-
-        ws = wb.active
-
-        ws.title = "Metadata Inventory"
-
-        ws.append(headers)
-
-
-
-        for rec in records:
-
-            ws.append([safe_text(rec.get(h, "")) for h in headers])
-
-
-
-        header_fill = PatternFill("solid", fgColor="1F4E79")
-
-        header_font = Font(color="FFFFFF", bold=True)
-
-        thin = Side(style="thin", color="D9E2F3")
-
-
-
-        for cell in ws[1]:
-
-            cell.fill = header_fill
-
-            cell.font = header_font
-
-            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-            cell.border = Border(top=thin, bottom=thin, left=thin, right=thin)
-
-
-
-        for row in ws.iter_rows(min_row=2):
-
-            for cell in row:
-
-                cell.alignment = Alignment(vertical="top", wrap_text=True)
-
-
-
-        ws.freeze_panes = "A2"
-
-        ws.auto_filter.ref = ws.dimensions
-
-
-
-        for idx, header in enumerate(headers, start=1):
-
-            values_for_col = [safe_text(header)]
-
-            for rec in records[:25]:
-
-                values_for_col.append(safe_text(rec.get(header, "")))
-
-            max_len = max([len(v) for v in values_for_col] or [12])
-
-            width = min(max(max_len + 2, 14), 55)
-
-            ws.column_dimensions[get_column_letter(idx)].width = width
-
-
-
-        # Save to a temp file first.
-
-        if os.path.exists(tmp_path):
-
-            try:
-
-                os.remove(tmp_path)
-
-            except Exception:
-
-                pass
-
-        wb.save(tmp_path)
-
-
-
-        # Verify temp workbook can be opened and contains the expected rows.
-
-        check_wb = load_workbook(tmp_path, data_only=True)
-
-        check_ws = check_wb.active
-
-        if check_ws.max_row < 1:
-
-            raise Exception("Temporary inventory workbook was created but has no header row.")
-
-        check_wb.close()
-
-
-
-        # Replace original. This fails clearly if the file is open/locked in Excel.
-
-        if os.path.exists(xlsx_path):
-
-            try:
-
-                if os.path.exists(backup_path):
-
-                    os.remove(backup_path)
-
-                os.replace(xlsx_path, backup_path)
-
-            except PermissionError:
-
-                raise Exception(
-
-                    "Inventory Excel is open or locked. Close the Excel workbook and run 'Generate ISO XML + Update Inventory' again.\n\n"
-
-                    f"Locked file: {xlsx_path}"
-
-                )
-
-        try:
-
-            os.replace(tmp_path, xlsx_path)
-
-        except PermissionError:
-
-            # Restore backup if replacement failed.
-
-            if os.path.exists(backup_path) and not os.path.exists(xlsx_path):
-
-                os.replace(backup_path, xlsx_path)
-
-            raise Exception(
-
-                "Inventory Excel is open or locked. Close the Excel workbook and run again.\n\n"
-
-                f"Locked file: {xlsx_path}"
-
-            )
-
-
-
-        # Keep backup only if needed? Remove to reduce confusion.
-
-        try:
-
-            if os.path.exists(backup_path):
-
-                os.remove(backup_path)
-
-        except Exception:
-
-            pass
-
+    if os.path.exists(xlsx_path):
         return xlsx_path
-
-
-
+    records = records or []
+    headers = INVENTORY_HEADERS[:]
+    for record in records:
+        for key in record:
+            if key not in headers:
+                headers.append(key)
+    try:
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Metadata Inventory"
+        worksheet.append(headers)
+        for record in records:
+            worksheet.append([safe_text(record.get(header, "")) for header in headers])
+        style_inventory_worksheet(worksheet, headers)
+        workbook.save(xlsx_path)
+        workbook.close()
+        return xlsx_path
+    except PermissionError:
+        raise Exception(f"Inventory Excel is open or locked. Close the workbook and try again.\n\nLocked file: {xlsx_path}")
     except Exception as exc:
-
-        # Clean temp but preserve original.
-
-        try:
-
-            if os.path.exists(tmp_path):
-
-                os.remove(tmp_path)
-
-        except Exception:
-
-            pass
-
-        raise Exception(f"Could not write inventory Excel: {exc}")
+        raise Exception(f"Could not create inventory Excel: {exc}")
 
 
+def inventory_identity(record):
+    """Return GUID, hash, source, and XML identity values from new or legacy columns."""
+    guid = safe_text(record.get("Dataset_GUID") or record.get("Dataset_ID"))
+    hash_value = safe_text(record.get("Dataset_Hash"))
+    source = safe_text(record.get("Dataset_Source") or record.get("Dataset_Path") or record.get("Data_Path"))
+    xml_path = safe_text(record.get("XML_Path") or record.get("Metadata_XML_Path"))
+    return guid, hash_value, source, xml_path
 
-def find_inventory_record(records, data_path="", xml_path="", dataset_id="", dataset_key="", dataset_hash_value=""):
 
-    data_norm = normalize_path(data_path)
-
-    xml_norm = normalize_path(xml_path)
-
-    dataset_id = safe_text(dataset_id)
-
-    dataset_key = safe_text(dataset_key) or canonical_dataset_key(data_path)
-
-    dataset_hash_value = safe_text(dataset_hash_value) or dataset_hash(data_path)
-
-    for idx, rec in enumerate(records):
-
-        if dataset_id and safe_text(rec.get("Dataset_ID")) == dataset_id:
-
-            return idx, rec
-
-        if dataset_hash_value and safe_text(rec.get("Dataset_Hash")) == dataset_hash_value:
-
-            return idx, rec
-
-        if dataset_key and safe_text(rec.get("Dataset_Key")) == dataset_key:
-
-            return idx, rec
-
-        if data_norm and normalize_path(rec.get("Data_Path")) == data_norm:
-
-            return idx, rec
-
-        if xml_norm and normalize_path(rec.get("Metadata_XML_Path")) == xml_norm:
-
-            return idx, rec
-
+def find_inventory_record(records, data_path="", xml_path="", dataset_id="", dataset_key="", dataset_hash_value="", layer_name=""):
+    """Find a record by GUID, hash, source, then XML path, in that order."""
+    del dataset_key  # Compatibility argument; hashes supersede stored keys.
+    requested_guid = safe_text(dataset_id)
+    requested_hash = safe_text(dataset_hash_value) or dataset_hash(data_path)
+    requested_source = canonical_dataset_key(data_path, layer_name)
+    requested_xml = normalized_source_path(xml_path)
+    priorities = (
+        lambda rec: requested_guid and inventory_identity(rec)[0] == requested_guid,
+        lambda rec: requested_hash and inventory_identity(rec)[1] == requested_hash,
+        lambda rec: requested_source and canonical_dataset_key(inventory_identity(rec)[2], rec.get("Layer_Name", "")) == requested_source,
+        lambda rec: requested_xml and normalized_source_path(inventory_identity(rec)[3]) == requested_xml,
+    )
+    for matches in priorities:
+        for index, record in enumerate(records):
+            if matches(record):
+                return index, record
     return None, None
 
 
 def upsert_inventory_xlsx(xlsx_path, row):
-
-    """Insert or update one metadata record and physically save the XLSX.
-
-
-
-    Matching priority:
-
-    1. Dataset_ID / UUID
-
-    2. Data_Path
-
-    3. Metadata_XML_Path
-
-
-
-    Returns: action, xlsx_path, excel_row_number, total_records
-
-    """
-
+    """Update or append one inventory row in place, preserving the workbook."""
+    from openpyxl import load_workbook
+    from openpyxl.styles import Alignment
     xlsx_path = safe_text(xlsx_path)
-
     if not xlsx_path.lower().endswith(".xlsx"):
-
         xlsx_path = os.path.splitext(xlsx_path)[0] + ".xlsx"
-
-
-
-    # Create a clean file first if missing, then read it.
-
     if not os.path.exists(xlsx_path):
-
-        write_inventory_xlsx(xlsx_path, [])
-
-
-
-    records = read_inventory_xlsx(xlsx_path)
-
-    idx, _ = find_inventory_record(
-
-        records,
-
-        data_path=row.get("Data_Path", ""),
-
-        xml_path=row.get("Metadata_XML_Path", ""),
-
-        dataset_id=row.get("Dataset_ID", ""),
-
-        dataset_key=row.get("Dataset_Key", ""),
-
-        dataset_hash_value=row.get("Dataset_Hash", "")
-
-    )
-
-
-
-    # Force all row values to strings so Excel gets visible cell contents.
-
-    row = {safe_text(k): safe_text(v) for k, v in row.items() if safe_text(k)}
-
-
-
-    if idx is None:
-
-        if not safe_text(row.get("SlNO", "")):
-
-            row["SlNO"] = str(len(records) + 1)
-
-        records.append(row)
-
-        idx = len(records) - 1
-
-        action = "created" if len(records) == 1 else "added"
-
-    else:
-
-        merged = records[idx].copy()
-
-        if not safe_text(row.get("SlNO", "")):
-
-            row["SlNO"] = safe_text(merged.get("SlNO", "")) or str(idx + 1)
-
-        for key in list(merged.keys()):
-
-            if key not in row:
-
-                row[key] = safe_text(merged.get(key, ""))
-
-        merged.update(row)
-
-        records[idx] = merged
-
-        action = "updated"
-
-
-
-    write_inventory_xlsx(xlsx_path, records)
-
-
-
-    # Confirm that the saved workbook contains the row.
-
+        write_inventory_xlsx(xlsx_path)
+    row = {safe_text(key): safe_text(value) for key, value in row.items() if safe_text(key)}
+    guid = row.get("Dataset_GUID") or row.get("Dataset_ID")
+    source = row.get("Dataset_Source") or row.get("Dataset_Path") or row.get("Data_Path")
+    layer_name = row.get("Layer_Name", "")
+    row["Dataset_GUID"] = guid
+    row["Dataset_ID"] = guid
+    row["Dataset_Source"] = source
+    row["Dataset_Path"] = source
+    row["Data_Path"] = source
+    row["Dataset_Hash"] = row.get("Dataset_Hash") or dataset_hash(source, layer_name)
+    row["XML_Path"] = row.get("XML_Path") or row.get("Metadata_XML_Path", "")
+    row["Metadata_XML_Path"] = row["XML_Path"]
+    row["Last_Modified"] = row.get("Last_Modified") or now_iso()
+    try:
+        workbook = load_workbook(xlsx_path)
+        worksheet = inventory_worksheet(workbook)
+        headers = [safe_text(cell.value) for cell in worksheet[1]] if worksheet.max_row else []
+        if not any(headers):
+            headers = INVENTORY_HEADERS[:]
+            for column, header in enumerate(headers, start=1):
+                worksheet.cell(1, column, header)
+        for header in INVENTORY_HEADERS + list(row):
+            if header not in headers:
+                headers.append(header)
+                worksheet.cell(1, len(headers), header)
+        # Read identity from this already-loaded worksheet, avoiding a second workbook load.
+        records = []
+        excel_rows = []
+        for excel_row_number, values in enumerate(worksheet.iter_rows(min_row=2, values_only=True), start=2):
+            if values and any(safe_text(value) for value in values):
+                records.append({header: safe_text(values[i]) if i < len(values) else "" for i, header in enumerate(headers) if header})
+                excel_rows.append(excel_row_number)
+        index, existing = find_inventory_record(records, data_path=source, xml_path=row.get("XML_Path", ""), dataset_id=guid, dataset_hash_value=row.get("Dataset_Hash", ""), layer_name=layer_name)
+        if index is None:
+            excel_row = worksheet.max_row + 1
+            action = "created" if not records else "added"
+            row.setdefault("SlNO", str(len(records) + 1))
+        else:
+            excel_row = excel_rows[index]
+            action = "updated"
+            row.setdefault("SlNO", safe_text((existing or {}).get("SlNO")) or str(index + 1))
+        columns = {header: position for position, header in enumerate(headers, start=1)}
+        for header, value in row.items():
+            cell = worksheet.cell(excel_row, columns[header])
+            cell.value = value
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+        style_inventory_worksheet(worksheet, headers)
+        workbook.save(xlsx_path)
+        workbook.close()
+    except PermissionError:
+        raise Exception(f"Inventory Excel is open or locked. Close the workbook and try again.\n\nLocked file: {xlsx_path}")
+    except Exception as exc:
+        raise Exception(f"Could not update inventory Excel: {exc}")
     verify_records = read_inventory_xlsx(xlsx_path)
-
-    verify_idx, _ = find_inventory_record(
-
-        verify_records,
-
-        data_path=row.get("Data_Path", ""),
-
-        xml_path=row.get("Metadata_XML_Path", ""),
-
-        dataset_id=row.get("Dataset_ID", ""),
-
-        dataset_key=row.get("Dataset_Key", ""),
-
-        dataset_hash_value=row.get("Dataset_Hash", "")
-
-    )
-
-    if verify_idx is None:
-
-        raise Exception("Inventory was saved but the new/updated row could not be verified after save.")
-
-
-
-    excel_row_number = verify_idx + 2  # +1 for zero-index, +1 for header row
-
-    return action, xlsx_path, excel_row_number, len(verify_records)
-
-
+    verify_index, _record = find_inventory_record(verify_records, data_path=source, xml_path=row.get("XML_Path", ""), dataset_id=guid, dataset_hash_value=row.get("Dataset_Hash", ""), layer_name=layer_name)
+    if verify_index is None:
+        raise Exception("Inventory was saved but the row could not be verified.")
+    return action, xlsx_path, verify_index + 2, len(verify_records)
 
 
 
@@ -4937,17 +4384,41 @@ class SOIMetadataDialog(QDialog):
 
     def create_metadata_tabs(self):
 
-        sections = []
+        """Build task-oriented tabs instead of exposing the raw ISO section order."""
 
-        for field in SOI_TEMPLATE_FIELDS:
+        tab_groups = [
 
-            if field["section"] not in sections:
+            ("Identification", {"Dataset File Information", "MD_Metadata › Identifier", "MD_DataIdentification › General"}),
 
-                sections.append(field["section"])
+            ("Citation", {"MD_DataIdentification › Citation"}),
 
+            ("Contact", {"MD_Metadata › Contact", "CI_Responsibility › Point of Contact"}),
 
+            ("Keywords", {"MD_Keywords"}),
 
-        for section in sections:
+            ("Extent", {"EX_Extent"}),
+
+            ("CRS", {"RS_ReferenceSystem › CRS", "MD_SpatialRepresentation"}),
+
+            ("Quality", {"DQ_DataQuality"}),
+
+            ("Constraints", {"MD_Constraints"}),
+
+            ("Distribution", {"MD_Distribution"}),
+
+            ("Lineage", {"LI_Lineage & Maintenance"}),
+
+            ("Advanced", {"MD_Metadata › Date & Standard", "MD_Metadata › Scope", "MD_ContentInformation", "FC_FeatureCatalogue", "Advanced / 3D"}),
+
+        ]
+
+        for tab_name, sections in tab_groups:
+
+            fields = [field for field in SOI_TEMPLATE_FIELDS if field["section"] in sections]
+
+            if not fields:
+
+                continue
 
             scroll = QScrollArea()
 
@@ -4959,40 +4430,37 @@ class SOIMetadataDialog(QDialog):
 
             form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
+            current_section = None
 
+            for field in fields:
 
-            for field in [f for f in SOI_TEMPLATE_FIELDS if f["section"] == section]:
+                if field["section"] != current_section:
 
-                label_text = field["label"]
+                    current_section = field["section"]
 
-                if field["required"].lower() == "yes":
+                    heading = QLabel(current_section)
 
-                    label_text += " *"
+                    heading.setStyleSheet("font-weight:bold; color:#1f4e79; padding-top:8px;")
 
+                    form.addRow(heading)
 
+                label_text = field["label"] + (" *" if field["required"].lower() == "yes" else "")
 
                 label = QLabel(label_text)
 
                 label.setToolTip(field["iso_path"])
 
-
-
                 widget = self.create_widget_for_field(field)
 
                 widget.setToolTip(field["iso_path"])
-
-
 
                 self.widgets[field["id"]] = widget
 
                 form.addRow(label, widget)
 
-
-
             scroll.setWidget(body)
 
-            self.tabs.addTab(scroll, section.replace(" › ", " - "))
-
+            self.tabs.addTab(scroll, tab_name)
 
 
     def create_widget_for_field(self, field):
@@ -5087,7 +4555,7 @@ class SOIMetadataDialog(QDialog):
 
 
 
-        self.registry_status_label = QLabel("Registry Status: Not checked")
+        self.registry_status_label = QLabel("Registry Status: —")
 
         self.registry_status_label.setStyleSheet("font-weight:bold; color:#546e7a; padding:4px;")
 
@@ -5135,7 +4603,7 @@ class SOIMetadataDialog(QDialog):
 
 
 
-        self.tabs.addTab(tab, "Interoperability Register")
+        self.tabs.addTab(tab, "Registry")
 
         self.create_soi_inventory_tab()
 
@@ -5235,6 +4703,16 @@ class SOIMetadataDialog(QDialog):
 
                 continue
 
+            if header == "DATASET TITLE":
+
+                note = QLabel("Derived automatically from ISO citation.title")
+
+                note.setStyleSheet("color:#1565c0; font-style:italic;")
+
+                form.addRow(QLabel(header), note)
+
+                continue
+
             if header in multiline_headers:
 
                 widget = QTextEdit()
@@ -5257,7 +4735,7 @@ class SOIMetadataDialog(QDialog):
 
         outer.addWidget(scroll)
 
-        self.tabs.addTab(container, "SOI Inventory Record")
+        self.tabs.addTab(container, "SOI Inventory")
 
 
 
@@ -6171,16 +5649,43 @@ class SOIMetadataDialog(QDialog):
 
     def set_status(self, text, ok=None):
 
+        """Show one of the four registry states, with details in the tooltip."""
+
         if not hasattr(self, "registry_status_label"):
 
             return
 
-        color = "#2e7d32" if ok is True else "#c62828" if ok is False else "#546e7a"
+        lowered = safe_text(text).lower()
 
-        self.registry_status_label.setText("Registry Status: " + text)
+        if "error" in lowered or "failed" in lowered:
+
+            label, color = "🔴 Inventory Error", "#c62828"
+
+        elif "not registered" in lowered or "not registered yet" in lowered:
+
+            label, color = "🔵 New Dataset", "#1565c0"
+
+        elif "registered" in lowered and ("missing" in lowered or "not exist" in lowered):
+
+            label, color = "🟡 Registered - XML Missing", "#f9a825"
+
+        elif "registered" in lowered:
+
+            label, color = "🟢 Registered", "#2e7d32"
+
+        elif "no dataset" in lowered or "inventory available" in lowered or "inventory created" in lowered:
+
+            label, color = "—", "#546e7a"
+
+        else:
+
+            label, color = "🔵 New Dataset", "#1565c0"
+
+        self.registry_status_label.setText("Registry Status: " + label)
+
+        self.registry_status_label.setToolTip(safe_text(text))
 
         self.registry_status_label.setStyleSheet(f"font-weight:bold; color:{color}; padding:4px;")
-
 
 
     def on_dataset_selection_changed(self, *args):
@@ -6571,7 +6076,9 @@ class SOIMetadataDialog(QDialog):
 
             "SlNO": inv("SlNO", ""),
 
-            "DATASET TITLE": inv("DATASET TITLE", dataset_id or os.path.splitext(file_name)[0]),
+            # ISO citation title is the master value; do not maintain a second editable title.
+
+            "DATASET TITLE": title,
 
             "NAME OF THE DATA": inv("NAME OF THE DATA", title),
 
@@ -6679,11 +6186,27 @@ class SOIMetadataDialog(QDialog):
 
         row.update({
 
+            "Dataset_GUID": dataset_id,
+
+            "Dataset_Hash": ds_hash,
+
+            "Dataset_Name": title,
+
+            "Dataset_Source": raster_path,
+
+            "Layer_Name": source_layer_name(raster_path, layer_name_for_key),
+
+            "Dataset_Path": raster_path,
+
+            "XML_Path": xml_path,
+
+            "Last_Modified": now_iso(),
+
+            # Legacy aliases retained while existing inventories migrate.
+
             "Dataset_ID": dataset_id,
 
             "Dataset_Key": ds_key,
-
-            "Dataset_Hash": ds_hash,
 
             "Dataset_Title": title,
 
@@ -6885,8 +6408,8 @@ class SOIMetadataDialog(QDialog):
         idx, record = find_inventory_record(
             records,
             data_path=data_path,
-            dataset_key=canonical_dataset_key(data_path, layer_name_for_key),
-            dataset_hash_value=dataset_hash(data_path, layer_name_for_key)
+            dataset_hash_value=dataset_hash(data_path, layer_name_for_key),
+            layer_name=layer_name_for_key
         )
 
         if record is None:
@@ -6901,7 +6424,7 @@ class SOIMetadataDialog(QDialog):
 
 
 
-        xml_path = record.get("Metadata_XML_Path", "")
+        xml_path = record.get("XML_Path") or record.get("Metadata_XML_Path", "")
 
         if xml_path:
 
@@ -6911,15 +6434,21 @@ class SOIMetadataDialog(QDialog):
 
             self.load_xml_into_gui(show_messages=False)
 
+        else:
+
+            self.set_status("Registered - XML Missing", False)
+
+            return record
+
 
 
         change_lines = []
 
         checks = {
 
-            "Dataset file modified time": (record.get("Dataset_Modified_Time", ""), file_modified_iso(data_path)),
+            "Dataset file modified time": (record.get("Dataset_Modified_Time", ""), file_modified_iso(self.clean_source_for_filesystem(data_path))),
 
-            "Dataset file size MB": (record.get("Dataset_File_Size_MB", ""), file_size_mb(data_path)),
+            "Dataset file size MB": (record.get("Dataset_File_Size_MB", ""), file_size_mb(self.clean_source_for_filesystem(data_path))),
 
             "Metadata XML modified time": (record.get("Metadata_XML_Modified_Time", ""), file_modified_iso(xml_path)),
 
@@ -7537,11 +7066,21 @@ class SOIMetadataDialog(QDialog):
 
             row = self.build_inventory_row_from_gui(xml_path=output_xml_path)
 
+            row["Dataset_GUID"] = dataset_id
+
             row["Dataset_ID"] = dataset_id
+
+            row["Dataset_Source"] = source_path
+
+            row["Dataset_Path"] = source_path
 
             row["Data_Path"] = source_path
 
+            row["XML_Path"] = output_xml_path
+
             row["Metadata_XML_Path"] = output_xml_path
+
+            row["Last_Modified"] = now_iso()
 
             row["Dataset_File_Size_MB"] = file_size_mb(self.clean_source_for_filesystem(source_path))
 

@@ -3417,8 +3417,8 @@ def write_metadata_xml(values, output_xml_path):
 
 
 # The visible SOI inventory form intentionally contains only registry fields that
-# are not already represented by the ISO metadata tabs.  The five identity
-# technical columns remain in the workbook for safe upserts and change checks.
+# are not already represented by the ISO metadata tabs. Technical identity and
+# timestamp columns remain in the workbook for safe upserts and change checks.
 SOI_INVENTORY_HEADERS = [
     "SlNO",
     "DATASET TITLE",
@@ -4082,6 +4082,7 @@ class SOIMetadataDialog(QDialog):
         self.field_lookup = {f["label"]: f["id"] for f in SOI_TEMPLATE_FIELDS}
 
         self.current_raster_metadata = {}
+        self._active_dataset_key = ""
 
 
 
@@ -4656,17 +4657,16 @@ class SOIMetadataDialog(QDialog):
 
 
 
-    def set_source_mode(self):
-
+    def set_source_mode(self, *args):
+        """Show the selected source controls and refresh the active dataset state."""
+        del args
         idx = self.source_type_combo.currentIndex() if hasattr(self, "source_type_combo") else 0
-
         self._set_layout_visible(self.project_layer_row, idx == 0)
-
         self._set_layout_visible(self.file_path_row, idx == 1)
-
         self._set_layout_visible(self.container_row, idx in (2, 3))
-
         self._set_layout_visible(self.container_layer_row, idx in (2, 3))
+        if not getattr(self, "_initializing", False) and hasattr(self, "interop_widgets"):
+            self.on_dataset_selection_changed()
 
 
 
@@ -5321,8 +5321,10 @@ class SOIMetadataDialog(QDialog):
         """Default XML path: fixed XML folder + selected file/layer name."""
 
         stem = self.safe_dataset_file_stem(layer=layer, source_path=source_path)
-
-        return os.path.join(self.default_xml_folder(), stem + "_SOI_ISO19115_metadata.xml")
+        layer_name = layer.name() if layer is not None else ""
+        identity = dataset_hash(source_path, layer_name)[:10]
+        suffix = "_" + identity if identity else ""
+        return os.path.join(self.default_xml_folder(), stem + suffix + "_SOI_ISO19115_metadata.xml")
 
 
 
@@ -5397,6 +5399,25 @@ class SOIMetadataDialog(QDialog):
         self.registry_status_label.setStyleSheet(f"font-weight:bold; color:{color}; padding:4px;")
 
 
+    def clear_dataset_state_for_selection(self):
+        """Clear values belonging to the previous dataset before switching sources."""
+        self.current_raster_metadata = {}
+        for widget in self.widgets.values():
+            if isinstance(widget, QTextEdit):
+                widget.clear()
+            elif isinstance(widget, QComboBox):
+                widget.setCurrentIndex(0)
+                if widget.isEditable() and widget.lineEdit():
+                    widget.lineEdit().clear()
+            else:
+                widget.clear()
+        for widget in getattr(self, "soi_inventory_widgets", {}).values():
+            widget.clear()
+        for key, widget in self.interop_widgets.items():
+            if key != "InventoryExcelPath":
+                widget.clear()
+        self.apply_readonly_rules()
+
     def on_dataset_selection_changed(self, *args):
 
         """When the selected layer changes, update paths and auto-load registered metadata if present.
@@ -5414,7 +5435,9 @@ class SOIMetadataDialog(QDialog):
         mode = self.source_type_combo.currentIndex() if hasattr(self, "source_type_combo") else 0
 
         if mode == 0 and self.project_layer_combo.currentData() is None:
-
+            if self._active_dataset_key:
+                self.clear_dataset_state_for_selection()
+            self._active_dataset_key = ""
             self.interop_widgets["DatasetStoragePath"].clear()
 
             self.interop_widgets["QGISLayerName"].clear()
@@ -5426,7 +5449,9 @@ class SOIMetadataDialog(QDialog):
             return
 
         if mode in (2, 3) and self.container_layer_combo.currentData() is None:
-
+            if self._active_dataset_key:
+                self.clear_dataset_state_for_selection()
+            self._active_dataset_key = ""
             self.set_status("Container selected. Choose a layer/raster to check registry.", None)
 
             return
@@ -5442,6 +5467,12 @@ class SOIMetadataDialog(QDialog):
             return
 
 
+
+        layer_name = layer.name() if layer is not None and layer.isValid() else ""
+        new_dataset_key = canonical_dataset_key(source_path, layer_name)
+        if new_dataset_key and new_dataset_key != self._active_dataset_key:
+            self.clear_dataset_state_for_selection()
+            self._active_dataset_key = new_dataset_key
 
         if layer is not None and layer.isValid():
 
@@ -5496,7 +5527,9 @@ class SOIMetadataDialog(QDialog):
             self.check_existing_inventory_for_selected_dataset(show_no_record=False, silent=True)
 
         else:
-
+            if self._active_dataset_key:
+                self.clear_dataset_state_for_selection()
+            self._active_dataset_key = ""
             self.set_status("No dataset selected", None)
 
 
@@ -5641,9 +5674,20 @@ class SOIMetadataDialog(QDialog):
 
 
 
+        # The selected QGIS dataset is authoritative. Linked XML may contain
+        # paths from an earlier machine or source and must not switch the active
+        # dataset/inventory context while its metadata values are being restored.
+        protected_context = {
+            "DatasetStoragePath",
+            "QGISLayerName",
+            "InventoryExcelPath",
+            "MetadataXMLPath",
+        }
         for key, value in xml_interop.items():
             if key == "InventoryCSVPath":
                 key = "InventoryExcelPath"
+            if key in protected_context:
+                continue
             if key in self.interop_widgets and safe_text(value):
                 self.interop_widgets[key].setText(safe_text(value))
 

@@ -40,6 +40,7 @@ from qgis.core import (
 
 
 from qgis.PyQt.QtCore import Qt, QSettings
+from qgis.PyQt.QtXml import QDomDocument
 
 
 from qgis.PyQt.QtWidgets import (
@@ -3669,9 +3670,10 @@ def write_metadata_xml(values, output_xml_path):
         lineage = ET.SubElement(lineage_wrapper, q("gmd", "LI_Lineage"))
         character(lineage, "statement", lineage_statement)
 
-    # QGIS ignores these unqualified extension blocks, while this tool uses them
-    # to restore every ISO/SOI GUI field without loss.
-    soi_block = ET.SubElement(root, "SOI_FieldValues")
+    # Preserve the lossless SOI blocks inside a schema-valid ISO maintenance
+    # note. Raw custom children under gmd:MD_Metadata can make strict importers reject XML.
+    payload = ET.Element("SOI_Payload")
+    soi_block = ET.SubElement(payload, "SOI_FieldValues")
     for field in SOI_TEMPLATE_FIELDS:
         value = safe_text(values.get(field["id"], ""))
         if value:
@@ -3679,23 +3681,72 @@ def write_metadata_xml(values, output_xml_path):
             field_element.set("id", field["id"])
             field_element.set("label", field["label"])
             field_element.text = value
-
-    interop_block = ET.SubElement(root, "SOI_Interop")
+    interop_block = ET.SubElement(payload, "SOI_Interop")
     for key, value in (values.get("_interop", {}) or {}).items():
         if safe_text(value):
             child = ET.SubElement(interop_block, xml_safe_tag(key))
             child.text = safe_text(value)
-
-    inventory_block = ET.SubElement(root, "SOI_Inventory")
+    inventory_block = ET.SubElement(payload, "SOI_Inventory")
     for key, value in (values.get("_soi_inventory", {}) or {}).items():
         if safe_text(value):
             field_element = ET.SubElement(inventory_block, "Field")
             field_element.set("name", safe_text(key))
             field_element.text = safe_text(value)
+    maintenance_wrapper = ET.SubElement(root, q("gmd", "metadataMaintenance"))
+    maintenance = ET.SubElement(maintenance_wrapper, q("gmd", "MD_MaintenanceInformation"))
+    character(maintenance, "maintenanceNote", "SOI_PAYLOAD_XML:" + ET.tostring(payload, encoding="unicode"))
 
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ", level=0)
     tree.write(output_xml_path, encoding="utf-8", xml_declaration=True)
+
+
+def write_qgis_qmd(layer, values, output_qmd_path):
+    """Write QGIS native QMD XML for direct loading in the Metadata dialog."""
+    if layer is None or not layer.isValid():
+        return ""
+    label_to_id = {field["label"]: field["id"] for field in SOI_TEMPLATE_FIELDS}
+    def get(label, default=""):
+        field_id = label_to_id.get(label)
+        return safe_text(values.get(field_id, default)) if field_id else safe_text(default)
+    metadata = layer.metadata()
+    metadata.setIdentifier(get("metadataIdentifier · code") or str(uuid.uuid4()))
+    metadata.setTitle(get("citation · title") or get("File name"))
+    metadata.setAbstract(get("abstract") or get("Brief description"))
+    metadata.setLanguage("eng")
+    metadata.setType(get("metadataScope · resourceScope") or "dataset")
+    metadata.setEncoding("UTF-8")
+    try:
+        metadata.setCrs(layer.crs())
+    except Exception:
+        pass
+    rights = [value for value in (get("useLimitation"), get("otherConstraints")) if value]
+    if rights:
+        metadata.setRights(rights)
+    lineage = get("resourceLineage · statement")
+    if lineage:
+        metadata.setHistory([lineage])
+    topic = get("topicCategory")
+    if topic:
+        metadata.setCategories([safe_text(value) for value in re.split(r"[;,]", topic) if safe_text(value)])
+    keyword_map = {}
+    for vocabulary, label in (("theme", "keyword · theme"), ("place", "keyword · place"), ("discipline", "keyword · discipline")):
+        keywords = [safe_text(value) for value in re.split(r"[;,]", get(label)) if safe_text(value)]
+        if keywords:
+            keyword_map[vocabulary] = keywords
+    if keyword_map:
+        metadata.setKeywords(keyword_map)
+    document = QDomDocument("qgis")
+    root = document.createElement("qgis")
+    root.setAttribute("version", "3")
+    document.appendChild(root)
+    metadata_element = document.createElement("resourceMetadata")
+    root.appendChild(metadata_element)
+    if not metadata.writeMetadataXml(metadata_element, document):
+        raise Exception("QGIS could not serialize the native layer metadata.")
+    with open(output_qmd_path, "w", encoding="utf-8") as qmd_file:
+        qmd_file.write(document.toString(2))
+    return output_qmd_path
 
 
 # The visible SOI inventory form intentionally contains only registry fields that
@@ -4171,6 +4222,88 @@ def read_metadata_xml_values(xml_path):
         if element is None:
             return ""
         return safe_text(element.attrib.get("codeListValue")) or safe_text(element.text)
+
+    payload_root = None
+    maintenance_note = text_at(root, ".//gmd:maintenanceNote/gco:CharacterString")
+    if maintenance_note.startswith("SOI_PAYLOAD_XML:"):
+        try:
+            payload_root = ET.fromstring(maintenance_note[len("SOI_PAYLOAD_XML:"):])
+        except ET.ParseError:
+            payload_root = None
+    if payload_root is not None:
+        for field_element in payload_root.findall("./SOI_FieldValues/Field"):
+            field_id = field_element.attrib.get("id", "")
+            label = field_element.attrib.get("label", "")
+            if field_id:
+                values[field_id] = safe_text(field_element.text)
+            elif label in label_to_id:
+                values[label_to_id[label]] = safe_text(field_element.text)
+        payload_interop = payload_root.find("SOI_Interop")
+        if payload_interop is not None:
+            for child in list(payload_interop):
+                interop[child.tag] = safe_text(child.text)
+        payload_inventory = payload_root.find("SOI_Inventory")
+        if payload_inventory is not None:
+            for field_element in payload_inventory.findall("Field"):
+                name = safe_text(field_element.attrib.get("name"))
+                if name:
+                    inventory[name] = safe_text(field_element.text)
+
+    # ISO 19115-3 modular encoding (mdb/mri/cit/mcc/gex/mrd/mrl).
+    ns3 = {
+        "mdb": "https://schemas.isotc211.org/19115/-1/mdb/1.3", "mri": "https://schemas.isotc211.org/19115/-1/mri/1.3",
+        "cit": "https://schemas.isotc211.org/19115/-1/cit/1.3", "mcc": "https://schemas.isotc211.org/19115/-1/mcc/1.3",
+        "gex": "https://schemas.isotc211.org/19115/-1/gex/1.3", "mrs": "https://schemas.isotc211.org/19115/-1/mrs/1.3",
+        "mrd": "https://schemas.isotc211.org/19115/-1/mrd/1.3", "mrl": "https://schemas.isotc211.org/19115/-1/mrl/1.3",
+        "gco": "https://schemas.isotc211.org/19103/-/gco/1.2",
+    }
+    if root.tag == "{%s}MD_Metadata" % ns3["mdb"]:
+        def text3(path):
+            element = root.find(path, ns3)
+            return safe_text(element.text) if element is not None else ""
+        def code3(path):
+            element = root.find(path, ns3)
+            return (safe_text(element.attrib.get("codeListValue")) or safe_text(element.text)) if element is not None else ""
+        set_label("metadataIdentifier · code", text3("mdb:metadataIdentifier/mcc:MD_Identifier/mcc:code/gco:CharacterString"))
+        set_label("dateInfo · date", text3("mdb:dateInfo/cit:CI_Date/cit:date/gco:DateTime") or text3("mdb:dateInfo/cit:CI_Date/cit:date/gco:Date"))
+        set_label("dateInfo · dateType", code3("mdb:dateInfo/cit:CI_Date/cit:dateType/cit:CI_DateTypeCode"))
+        set_label("citation · title", text3("mdb:identificationInfo/mri:MD_DataIdentification/mri:citation/cit:CI_Citation/cit:title/gco:CharacterString"))
+        set_label("abstract", text3("mdb:identificationInfo/mri:MD_DataIdentification/mri:abstract/gco:CharacterString"))
+        set_label("Brief description", text3("mdb:identificationInfo/mri:MD_DataIdentification/mri:abstract/gco:CharacterString"))
+        set_label("purpose", text3("mdb:identificationInfo/mri:MD_DataIdentification/mri:purpose/gco:CharacterString"))
+        set_label("Horizontal CRS · code", text3("mdb:referenceSystemInfo/mrs:MD_ReferenceSystem/mrs:referenceSystemIdentifier/mcc:MD_Identifier/mcc:code/gco:CharacterString"))
+        set_label("geographicElement · westBoundLongitude", text3(".//gex:EX_GeographicBoundingBox/gex:westBoundLongitude/gco:Decimal"))
+        set_label("geographicElement · eastBoundLongitude", text3(".//gex:EX_GeographicBoundingBox/gex:eastBoundLongitude/gco:Decimal"))
+        set_label("geographicElement · southBoundLatitude", text3(".//gex:EX_GeographicBoundingBox/gex:southBoundLatitude/gco:Decimal"))
+        set_label("geographicElement · northBoundLatitude", text3(".//gex:EX_GeographicBoundingBox/gex:northBoundLatitude/gco:Decimal"))
+        set_label("distributionFormat · name", text3("mdb:distributionInfo/mrd:MD_Distribution/mrd:distributionFormat/mrd:MD_Format/mrd:name/gco:CharacterString"))
+        set_label("distributionFormat · version", text3("mdb:distributionInfo/mrd:MD_Distribution/mrd:distributionFormat/mrd:MD_Format/mrd:version/gco:CharacterString"))
+        set_label("resourceLineage · statement", text3("mdb:resourceLineage/mrl:LI_Lineage/mrl:statement/gco:CharacterString"))
+
+    # QGIS native QMD XML used by the layer Metadata dialog.
+    if root.tag.split("}")[-1].lower() == "qgis":
+        metadata_element = root.find("resourceMetadata")
+        if metadata_element is None:
+            metadata_element = root
+        def qmd_text(tag):
+            element = metadata_element.find(tag)
+            return safe_text(element.text) if element is not None else ""
+        set_label("metadataIdentifier · code", qmd_text("identifier"))
+        set_label("citation · title", qmd_text("title"))
+        set_label("abstract", qmd_text("abstract"))
+        set_label("Brief description", qmd_text("abstract"))
+        set_label("metadataScope · resourceScope", qmd_text("type"))
+        crs_element = metadata_element.find("crs")
+        if crs_element is not None:
+            set_label("Horizontal CRS · code", crs_element.attrib.get("authid") or crs_element.attrib.get("srsid"))
+        set_label("topicCategory", "; ".join(safe_text(e.text) for e in metadata_element.findall("categories") if safe_text(e.text)))
+        set_label("useLimitation", "; ".join(safe_text(e.text) for e in metadata_element.findall("rights") if safe_text(e.text)))
+        set_label("resourceLineage · statement", "\n".join(safe_text(e.text) for e in metadata_element.findall("history") if safe_text(e.text)))
+        for keyword_group in metadata_element.findall("keywords"):
+            vocabulary = safe_text(keyword_group.attrib.get("vocabulary")) or "theme"
+            keywords = "; ".join(safe_text(e.text) for e in keyword_group.findall("keyword") if safe_text(e.text))
+            target = {"place": "keyword · place", "discipline": "keyword · discipline"}.get(vocabulary, "keyword · theme")
+            set_label(target, keywords)
 
     # Parse the native QGIS ISO 19115:2003 / ISO 19139 body. This remains useful
     # if QGIS has imported and re-exported the XML and removed the SOI extensions.
@@ -4864,8 +4997,8 @@ class SOIMetadataDialog(QDialog):
         actions = QHBoxLayout()
         for text, handler in (
             ("Set Inventory Excel", self.browse_inventory_excel),
-            ("Browse XML", self.browse_existing_xml),
-            ("Load XML", self.load_xml_into_gui),
+            ("Browse XML/QMD", self.browse_existing_xml),
+            ("Load Metadata", self.load_xml_into_gui),
             ("Update Inventory from XML", self.add_or_update_inventory_from_existing_xml),
             ("Check Changes", self.check_inventory_xml_changes),
         ):
@@ -5947,11 +6080,11 @@ class SOIMetadataDialog(QDialog):
 
             self,
 
-            "Select Existing Metadata XML",
+            "Select Existing Metadata XML or QMD",
 
             os.path.dirname(self.raster_path_edit.text().strip()) if self.raster_path_edit.text().strip() else "",
 
-            "XML Files (*.xml);;All Files (*.*)"
+            "Metadata Files (*.xml *.qmd);;XML Files (*.xml);;QGIS Metadata (*.qmd);;All Files (*.*)"
 
         )
 
@@ -6870,17 +7003,21 @@ class SOIMetadataDialog(QDialog):
 
 
 
+        qmd_path = os.path.splitext(output_xml_path)[0] + ".qmd"
+        qmd_error = ""
         try:
-
             write_metadata_xml(values, output_xml_path)
-
         except Exception as exc:
-
-            QMessageBox.critical(self, "XML Error", f"Failed to generate XML:\n\n{exc}")
-
+            QMessageBox.critical(self, "XML Error", f"Failed to generate ISO XML:\n\n{exc}")
             return
-
-
+        if layer is not None and layer.isValid():
+            try:
+                write_qgis_qmd(layer, values, qmd_path)
+            except Exception as exc:
+                qmd_error = safe_text(exc)
+                qmd_path = ""
+        else:
+            qmd_path = ""
 
         inventory_msg = ""
 
@@ -6965,7 +7102,10 @@ class SOIMetadataDialog(QDialog):
 
             "Completed",
 
-            f"Metadata XML generated successfully:\n{output_xml_path}{inventory_msg}"
+            f"ISO 19139 XML generated successfully:\n{output_xml_path}"
+            + (f"\n\nQGIS native metadata generated:\n{qmd_path}" if qmd_path else "")
+            + (f"\n\nQGIS QMD warning: {qmd_error}" if qmd_error else "")
+            + inventory_msg
 
         )
 

@@ -41,7 +41,6 @@ from qgis.core import (
 
 from qgis.PyQt.QtCore import Qt, QSettings
 
-from qgis.PyQt.QtGui import QColor
 
 from qgis.PyQt.QtWidgets import (
 
@@ -3396,6 +3395,14 @@ def write_metadata_xml(values, output_xml_path):
             child.text = safe_text(val)
 
 
+    inventory_block = ET.SubElement(root, "SOI_Inventory")
+    for key, val in (values.get("_soi_inventory", {}) or {}).items():
+        if safe_text(val):
+            field_el = ET.SubElement(inventory_block, "Field")
+            field_el.set("name", safe_text(key))
+            field_el.text = safe_text(val)
+
+
 
     tree = ET.ElementTree(root)
 
@@ -3409,152 +3416,52 @@ def write_metadata_xml(values, output_xml_path):
 
 
 
-# SOI inventory columns observed in the official/sample SOI metadata field form.
-
-# These are kept first in the generated Excel so the register looks like the
-
-# format SOI users already fill manually.
-
+# The visible SOI inventory form intentionally contains only registry fields that
+# are not already represented by the ISO metadata tabs.  The five identity
+# technical columns remain in the workbook for safe upserts and change checks.
 SOI_INVENTORY_HEADERS = [
-
     "SlNO",
-
     "DATASET TITLE",
-
     "NAME OF THE DATA",
-
-    "KEYWORDS",
-
-    "ACCESS CONSTRAINTS",
-
-    "USE CONSTRAINTS",
-
     "DATA TYPE",
-
-    "METADATA STANDARD VERSION",
-
-    "AVAILABILITY",
-
-    "DQ TOPOLOGICAL CONSISTENCY",
-
-    "DATA PREPARED BY",
-
-    "ORIGINAL SOURCE",
-
-    "SURVEY SCALE ",
-
-    "SURVEY  YEAR",
-
-    "CONTOUR INTERVAL ",
-
-    "DIGITISATION/FAIR MAPPING OFFICE",
-
-    "PUBLICATION YEAR",
-
-    "CONTACT PERSON ",
-
-    "OFFICE AND ORGANISATION NAME",
-
-    "MAILING ADDRESS",
-
-    "CITY",
-
-    "COUNTRY",
-
-    "CONTACT TELEPHONE",
-
-    "CONTACT FAX",
-
-    "CONTACT EMAIL",
-
-    "X_MINIMUM",
-
-    "X_MAXIMUM",
-
-    "Y_MINIMUM",
-
-    "Y_MAXIMUM",
-
-    "SPATIAL RESOLUTION/ACCURACY",
-
-    "SPATIAL GEOREFERENCE",
-
-    "GEOGRAPHIC DESCRIPTION",
-
-    "NAME OF PROJECTION",
-
-    "UNIT PROJECTION PARAMETERS",
-
-    "DATA FORMAT",
-
-    "DATA FILE SIZE",
-
-    "DATA PHYSICAL LOCATION",
-
     "DATASET RESPONSIBLE PARTY",
-
-    "DISTRIBUTION FORMAT",
-
+    "ORIGINAL SOURCE",
+    "SURVEY SCALE",
+    "SURVEY YEAR",
+    "PUBLICATION YEAR",
+    "AVAILABILITY",
     "LANGUAGE",
-
-    "NAME OF THE SATELLITE",
-
-    "SENSOR",
-
-    "IMAGE ACQUIRED FROM",
-
-    "DATE AND TIME OF IMAGE",
-
-    "FILE FORMAT",
-
-    "BITS PER PIXEL ",
-
-    "SPATIAL RESOLUTION",
-
-    "SPATIAL RESOLUTION UNIT",
-
-    "NUMBER OF BANDS",
-
     "RIGHTS",
-
-    "METADAT DATE AND STAMP",
-
+    "DISTRIBUTION FORMAT",
+    "METADATA DATE STAMP",
+    "DATA PHYSICAL LOCATION",
+    "REMARKS",
 ]
 
-
-
-# Internal/system tracking columns are placed after the SOI inventory columns.
+AUTO_DERIVED_INVENTORY_HEADERS = {
+    "DATASET TITLE",
+    "NAME OF THE DATA",
+    "DATA TYPE",
+    "DATASET RESPONSIBLE PARTY",
+    "DISTRIBUTION FORMAT",
+    "RIGHTS",
+    "METADATA DATE STAMP",
+}
 
 SYSTEM_INVENTORY_HEADERS = [
-
-    "Dataset_GUID", "Dataset_Hash", "Dataset_Name", "Dataset_Source", "Layer_Name",
-
-    "Dataset_Path", "XML_Path", "Last_Modified",
-
-    # Legacy aliases are retained for compatibility with existing workbooks.
-
-    "Dataset_ID", "Dataset_Key", "Dataset_Title", "File_Name", "Data_Path", "Metadata_XML_Path",
-
-    "Metadata_Date", "CRS", "West", "East", "South", "North", "QGIS_Project",
-
-    "ArcGIS_Pro_Project", "GeoServer_Workspace", "GeoServer_Store", "GeoServer_Layer",
-
-    "ArcGIS_Server_Service", "ArcGIS_Online_Item_ID", "Data_Owner_Department",
-
-    "Contact_Email", "Security_Classification", "Dataset_File_Size_MB",
-
-    "Dataset_Modified_Time", "Metadata_XML_Modified_Time", "Remarks",
-
+    "Dataset_Key",
+    "Dataset_Hash",
+    "Dataset_ID",
+    "Data_Path",
+    "Metadata_XML_Path",
+    "Layer_Name",
+    "Dataset_Modified_Time",
+    "Metadata_XML_Modified_Time",
+    "Last_Modified",
 ]
 
-
-
-INVENTORY_HEADERS = SOI_INVENTORY_HEADERS + [h for h in SYSTEM_INVENTORY_HEADERS if h not in SOI_INVENTORY_HEADERS]
-
+INVENTORY_HEADERS = SOI_INVENTORY_HEADERS + SYSTEM_INVENTORY_HEADERS
 SOI_INVENTORY_FIELD_COUNT = len(SOI_INVENTORY_HEADERS)
-
-
-
 
 
 def split_qgis_source(source):
@@ -3778,56 +3685,72 @@ def write_inventory_xlsx(xlsx_path, records=None):
 
 
 def inventory_identity(record):
-    """Return GUID, hash, source, and XML identity values from new or legacy columns."""
-    guid = safe_text(record.get("Dataset_GUID") or record.get("Dataset_ID"))
-    hash_value = safe_text(record.get("Dataset_Hash"))
-    source = safe_text(record.get("Dataset_Source") or record.get("Dataset_Path") or record.get("Data_Path"))
-    xml_path = safe_text(record.get("XML_Path") or record.get("Metadata_XML_Path"))
-    return guid, hash_value, source, xml_path
+    """Return normalized values for every supported inventory identity column."""
+    data_path = safe_text(record.get("Data_Path") or record.get("Dataset_Path") or record.get("Dataset_Source"))
+    layer_name = safe_text(record.get("Layer_Name"))
+    return {
+        "Dataset_Key": safe_text(record.get("Dataset_Key")) or canonical_dataset_key(data_path, layer_name),
+        "Dataset_Hash": safe_text(record.get("Dataset_Hash")),
+        "Dataset_ID": safe_text(record.get("Dataset_ID") or record.get("Dataset_GUID")),
+        "Data_Path": data_path,
+        "Metadata_XML_Path": safe_text(record.get("Metadata_XML_Path") or record.get("XML_Path")),
+        "Layer_Name": layer_name,
+    }
 
 
 def find_inventory_record(records, data_path="", xml_path="", dataset_id="", dataset_key="", dataset_hash_value="", layer_name=""):
-    """Find a record by GUID, hash, source, then XML path, in that order."""
-    del dataset_key  # Compatibility argument; hashes supersede stored keys.
-    requested_guid = safe_text(dataset_id)
-    requested_hash = safe_text(dataset_hash_value) or dataset_hash(data_path)
-    requested_source = canonical_dataset_key(data_path, layer_name)
-    requested_xml = normalized_source_path(xml_path)
-    priorities = (
-        lambda rec: requested_guid and inventory_identity(rec)[0] == requested_guid,
-        lambda rec: requested_hash and inventory_identity(rec)[1] == requested_hash,
-        lambda rec: requested_source and canonical_dataset_key(inventory_identity(rec)[2], rec.get("Layer_Name", "")) == requested_source,
-        lambda rec: requested_xml and normalized_source_path(inventory_identity(rec)[3]) == requested_xml,
-    )
-    for matches in priorities:
+    """Find a record using each supported stable identifier, strongest first."""
+    requested = {
+        "Dataset_Key": safe_text(dataset_key) or canonical_dataset_key(data_path, layer_name),
+        "Dataset_Hash": safe_text(dataset_hash_value) or dataset_hash(data_path, layer_name),
+        "Dataset_ID": safe_text(dataset_id),
+        "Data_Path": canonical_dataset_key(data_path, layer_name),
+        "Metadata_XML_Path": normalized_source_path(xml_path),
+    }
+
+    def matches(record, field):
+        identity = inventory_identity(record)
+        wanted = requested[field]
+        if not wanted:
+            return False
+        if field == "Data_Path":
+            actual = canonical_dataset_key(identity[field], identity["Layer_Name"])
+        elif field == "Metadata_XML_Path":
+            actual = normalized_source_path(identity[field])
+        else:
+            actual = identity[field]
+        return safe_text(actual).casefold() == safe_text(wanted).casefold()
+
+    for field in ("Dataset_Key", "Dataset_Hash", "Dataset_ID", "Data_Path", "Metadata_XML_Path"):
         for index, record in enumerate(records):
-            if matches(record):
+            if matches(record, field):
                 return index, record
     return None, None
 
 
 def upsert_inventory_xlsx(xlsx_path, row):
-    """Update or append one inventory row in place, preserving the workbook."""
+    """Create or update one row in place using openpyxl only."""
     from openpyxl import load_workbook
     from openpyxl.styles import Alignment
+
     xlsx_path = safe_text(xlsx_path)
+    if not xlsx_path:
+        raise Exception("Inventory Excel path is blank.")
     if not xlsx_path.lower().endswith(".xlsx"):
         xlsx_path = os.path.splitext(xlsx_path)[0] + ".xlsx"
     if not os.path.exists(xlsx_path):
         write_inventory_xlsx(xlsx_path)
+
     row = {safe_text(key): safe_text(value) for key, value in row.items() if safe_text(key)}
-    guid = row.get("Dataset_GUID") or row.get("Dataset_ID")
-    source = row.get("Dataset_Source") or row.get("Dataset_Path") or row.get("Data_Path")
+    source = row.get("Data_Path", "")
     layer_name = row.get("Layer_Name", "")
-    row["Dataset_GUID"] = guid
-    row["Dataset_ID"] = guid
-    row["Dataset_Source"] = source
-    row["Dataset_Path"] = source
-    row["Data_Path"] = source
+    row["Dataset_Key"] = row.get("Dataset_Key") or canonical_dataset_key(source, layer_name)
     row["Dataset_Hash"] = row.get("Dataset_Hash") or dataset_hash(source, layer_name)
-    row["XML_Path"] = row.get("XML_Path") or row.get("Metadata_XML_Path", "")
-    row["Metadata_XML_Path"] = row["XML_Path"]
+    row["Dataset_ID"] = row.get("Dataset_ID", "")
+    row["Metadata_XML_Path"] = row.get("Metadata_XML_Path", "")
     row["Last_Modified"] = row.get("Last_Modified") or now_iso()
+
+    workbook = None
     try:
         workbook = load_workbook(xlsx_path)
         worksheet = inventory_worksheet(workbook)
@@ -3836,44 +3759,63 @@ def upsert_inventory_xlsx(xlsx_path, row):
             headers = INVENTORY_HEADERS[:]
             for column, header in enumerate(headers, start=1):
                 worksheet.cell(1, column, header)
-        for header in INVENTORY_HEADERS + list(row):
+        for header in INVENTORY_HEADERS:
             if header not in headers:
                 headers.append(header)
                 worksheet.cell(1, len(headers), header)
-        # Read identity from this already-loaded worksheet, avoiding a second workbook load.
+
         records = []
         excel_rows = []
         for excel_row_number, values in enumerate(worksheet.iter_rows(min_row=2, values_only=True), start=2):
             if values and any(safe_text(value) for value in values):
                 records.append({header: safe_text(values[i]) if i < len(values) else "" for i, header in enumerate(headers) if header})
                 excel_rows.append(excel_row_number)
-        index, existing = find_inventory_record(records, data_path=source, xml_path=row.get("XML_Path", ""), dataset_id=guid, dataset_hash_value=row.get("Dataset_Hash", ""), layer_name=layer_name)
+
+        index, existing = find_inventory_record(
+            records,
+            data_path=source,
+            xml_path=row["Metadata_XML_Path"],
+            dataset_id=row["Dataset_ID"],
+            dataset_key=row["Dataset_Key"],
+            dataset_hash_value=row["Dataset_Hash"],
+            layer_name=layer_name,
+        )
         if index is None:
             excel_row = worksheet.max_row + 1
             action = "created" if not records else "added"
-            row.setdefault("SlNO", str(len(records) + 1))
+            row["SlNO"] = row.get("SlNO") or str(len(records) + 1)
         else:
             excel_row = excel_rows[index]
             action = "updated"
-            row.setdefault("SlNO", safe_text((existing or {}).get("SlNO")) or str(index + 1))
+            row["SlNO"] = row.get("SlNO") or safe_text((existing or {}).get("SlNO")) or str(index + 1)
+
         columns = {header: position for position, header in enumerate(headers, start=1)}
-        for header, value in row.items():
+        for header in INVENTORY_HEADERS:
             cell = worksheet.cell(excel_row, columns[header])
-            cell.value = value
+            cell.value = row.get(header, "")
             cell.alignment = Alignment(vertical="top", wrap_text=True)
         style_inventory_worksheet(worksheet, headers)
         workbook.save(xlsx_path)
         workbook.close()
+        workbook = None
     except PermissionError:
-        raise Exception(f"Inventory Excel is open or locked. Close the workbook and try again.\n\nLocked file: {xlsx_path}")
+        raise Exception(
+            "Inventory Excel is open or locked in Excel. Close the workbook and try again."
+            f"\n\nLocked file: {xlsx_path}"
+        )
     except Exception as exc:
+        if "permission" in safe_text(exc).lower() or "denied" in safe_text(exc).lower():
+            raise Exception(
+                "Inventory Excel is open or locked in Excel. Close the workbook and try again."
+                f"\n\nLocked file: {xlsx_path}"
+            )
         raise Exception(f"Could not update inventory Excel: {exc}")
-    verify_records = read_inventory_xlsx(xlsx_path)
-    verify_index, _record = find_inventory_record(verify_records, data_path=source, xml_path=row.get("XML_Path", ""), dataset_id=guid, dataset_hash_value=row.get("Dataset_Hash", ""), layer_name=layer_name)
-    if verify_index is None:
-        raise Exception("Inventory was saved but the row could not be verified.")
-    return action, xlsx_path, verify_index + 2, len(verify_records)
+    finally:
+        if workbook is not None:
+            workbook.close()
 
+    total_records = len(read_inventory_xlsx(xlsx_path))
+    return action, xlsx_path, excel_row, total_records
 
 
 def read_metadata_xml_values(xml_path):
@@ -3881,10 +3823,10 @@ def read_metadata_xml_values(xml_path):
     values = {}
 
     interop = {}
+    inventory = {}
 
     if not xml_path or not os.path.exists(xml_path):
-
-        return values, interop
+        return values, interop, inventory
 
     root = ET.parse(xml_path).getroot()
 
@@ -3940,7 +3882,14 @@ def read_metadata_xml_values(xml_path):
 
 
 
-    return values, interop
+    inventory_el = root.find("SOI_Inventory")
+    if inventory_el is not None:
+        for field_el in inventory_el.findall("Field"):
+            name = safe_text(field_el.attrib.get("name"))
+            if name:
+                inventory[name] = safe_text(field_el.text)
+
+    return values, interop, inventory
 
 
 
@@ -4152,7 +4101,7 @@ class SOIMetadataDialog(QDialog):
 
         info = QLabel(
 
-            "Workflow: 1) Select raster  2) Extract auto metadata  3) Fill mandatory ISO fields  4) Generate ISO XML + update inventory. SOI Inventory Record and Interoperability Register are available as scrollable tabs; bottom action buttons remain fixed."
+            "Workflow: 1) Select a layer or dataset  2) Extract auto metadata  3) Fill mandatory ISO fields  4) Generate ISO XML + update inventory. SOI Inventory Record and Interoperability Register are available as scrollable tabs; bottom action buttons remain fixed."
 
         )
 
@@ -4326,13 +4275,17 @@ class SOIMetadataDialog(QDialog):
 
         save_xml_btn = QPushButton("Generate ISO XML + Update Inventory")
 
-        save_xml_btn.clicked.connect(self.generate_xml_and_inventory)
+        # QPushButton.clicked emits a boolean ``checked`` argument. Connecting it
+        # directly to generate_xml_and_inventory(update_inventory=True) replaces
+        # that default with False for a normal button click, silently selecting
+        # the XML-only path. Route both buttons through explicit slots instead.
+        save_xml_btn.clicked.connect(self.generate_xml_and_update_inventory)
 
 
 
         save_xml_only_btn = QPushButton("Generate ISO XML Only")
 
-        save_xml_only_btn.clicked.connect(lambda: self.generate_xml_and_inventory(update_inventory=False))
+        save_xml_only_btn.clicked.connect(self.generate_xml_only)
 
 
 
@@ -4508,236 +4461,87 @@ class SOIMetadataDialog(QDialog):
 
 
     def create_interoperability_tab(self):
-
         tab = QWidget()
-
-        form = QFormLayout(tab)
-
-
-
+        outer = QVBoxLayout(tab)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        fields_body = QWidget()
+        form = QFormLayout(fields_body)
         self.interop_widgets = {}
 
-
-
         interop_fields = [
-
             ("DatasetStoragePath", "Dataset Storage Path"),
-
             ("MetadataXMLPath", "Metadata XML Path"),
-
             ("QGISLayerName", "QGIS Layer Name"),
-
             ("ArcGISProItemName", "ArcGIS Pro Item Name"),
-
             ("GeoServerWorkspace", "GeoServer Workspace"),
-
             ("GeoServerStore", "GeoServer Store"),
-
             ("GeoServerLayer", "GeoServer Layer"),
-
             ("ArcGISServerService", "ArcGIS Server Service"),
-
             ("ArcGISOnlineItemID", "ArcGIS Online Item ID"),
-
-            ("InventoryCSVPath", "Metadata Inventory Excel Path (.xlsx)"),
-
+            ("InventoryExcelPath", "Metadata Inventory Excel Path (.xlsx)"),
         ]
-
-
-
         for key, label in interop_fields:
-
             edit = QLineEdit()
-
             self.interop_widgets[key] = edit
-
             form.addRow(QLabel(label), edit)
 
-
-
         self.registry_status_label = QLabel("Registry Status: —")
-
+        self.registry_status_label.setWordWrap(True)
         self.registry_status_label.setStyleSheet("font-weight:bold; color:#546e7a; padding:4px;")
-
         form.addRow(QLabel("Auto Registry Check"), self.registry_status_label)
-
-
-
-        browse_inventory_btn = QPushButton("Browse / Set Inventory Excel")
-
-        browse_inventory_btn.clicked.connect(self.browse_inventory_csv)
-
-        form.addRow(QLabel("Inventory Register"), browse_inventory_btn)
-
-
-
-        browse_xml_btn = QPushButton("Browse Existing Metadata XML")
-
-        browse_xml_btn.clicked.connect(self.browse_existing_xml)
-
-        form.addRow(QLabel("Existing XML"), browse_xml_btn)
-
-
-
-        load_xml_btn = QPushButton("Load XML into GUI")
-
-        load_xml_btn.clicked.connect(self.load_xml_into_gui)
-
-        form.addRow(QLabel("Load Metadata"), load_xml_btn)
-
-
-
-        update_inventory_from_xml_btn = QPushButton("Add / Update Inventory from XML")
-
-        update_inventory_from_xml_btn.clicked.connect(self.add_or_update_inventory_from_existing_xml)
-
-        form.addRow(QLabel("Inventory Update"), update_inventory_from_xml_btn)
-
-
-
-        check_changes_btn = QPushButton("Check Inventory / XML Changes")
-
-        check_changes_btn.clicked.connect(self.check_inventory_xml_changes)
-
-        form.addRow(QLabel("Change Check"), check_changes_btn)
-
-
-
-        self.tabs.addTab(tab, "Registry")
-
-        self.create_soi_inventory_tab()
-
-
-
-    def create_soi_inventory_tab(self):
-
-        """SOI inventory-only fields matching the official/sample inventory register.
-
-
-
-        These fields are written to the Excel register exactly as SOI inventory
-
-        columns. ISO-compatible values are also mapped into the metadata XML;
-
-        administrative/inventory-only values remain in the Excel register.
-
-        """
-
-        container = QWidget()
-
-        outer = QVBoxLayout(container)
-
-
-
-        hint = QLabel(
-
-            "SOI inventory record fields. These are the same columns used in the SOI inventory table. "
-
-            "Fields that are not ISO metadata are still preserved in the Excel registry. "
-
-            "Use Auto-fill to copy values from QGIS/ISO fields; manually complete missing SOI office, survey, image and rights fields."
-
-        )
-
-        hint.setWordWrap(True)
-
-        hint.setStyleSheet("color:#455a64; padding:6px;")
-
-        outer.addWidget(hint)
-
-
-
-        top_buttons = QHBoxLayout()
-
-        autofill_btn = QPushButton("Auto-fill SOI Inventory Fields")
-
-        autofill_btn.clicked.connect(lambda: self.populate_soi_inventory_defaults(overwrite=True))
-
-        clear_btn = QPushButton("Clear Manual SOI Inventory Fields")
-
-        clear_btn.clicked.connect(self.clear_soi_inventory_fields)
-
-        top_buttons.addWidget(autofill_btn)
-
-        top_buttons.addWidget(clear_btn)
-
-        top_buttons.addStretch()
-
-        outer.addLayout(top_buttons)
-
-
-
-        scroll = QScrollArea()
-
-        scroll.setWidgetResizable(True)
-
-        body = QWidget()
-
-        form = QFormLayout(body)
-
-        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-
-
-
-        self.soi_inventory_widgets = {}
-
-        multiline_headers = {
-
-            "MAILING ADDRESS", "RIGHTS", "ORIGINAL SOURCE", "GEOGRAPHIC DESCRIPTION",
-
-            "SPATIAL RESOLUTION/ACCURACY", "UNIT PROJECTION PARAMETERS",
-
-            "DATA PHYSICAL LOCATION"
-
-        }
-
-        for header in SOI_INVENTORY_HEADERS:
-
-            if header == "SlNO":
-
-                note = QLabel("Assigned automatically during inventory save")
-
-                note.setStyleSheet("color:#607d8b;")
-
-                form.addRow(QLabel("SlNO"), note)
-
-                continue
-
-            if header == "DATASET TITLE":
-
-                note = QLabel("Derived automatically from ISO citation.title")
-
-                note.setStyleSheet("color:#1565c0; font-style:italic;")
-
-                form.addRow(QLabel(header), note)
-
-                continue
-
-            if header in multiline_headers:
-
-                widget = QTextEdit()
-
-                widget.setMinimumHeight(60)
-
-            else:
-
-                widget = QLineEdit()
-
-            widget.setToolTip("Stored in Excel registry column: " + header)
-
-            self.soi_inventory_widgets[header] = widget
-
-            form.addRow(QLabel(header), widget)
-
-
-
-        scroll.setWidget(body)
-
+        scroll.setWidget(fields_body)
         outer.addWidget(scroll)
 
+        actions = QHBoxLayout()
+        for text, handler in (
+            ("Set Inventory Excel", self.browse_inventory_excel),
+            ("Browse XML", self.browse_existing_xml),
+            ("Load XML", self.load_xml_into_gui),
+            ("Update Inventory from XML", self.add_or_update_inventory_from_existing_xml),
+            ("Check Changes", self.check_inventory_xml_changes),
+        ):
+            button = QPushButton(text)
+            button.clicked.connect(handler)
+            actions.addWidget(button)
+        outer.addLayout(actions)
+
+        self.tabs.addTab(tab, "Registry / Interoperability")
+        self.create_soi_inventory_tab()
+
+    def create_soi_inventory_tab(self):
+        """Build the reduced SOI registry form without duplicating ISO sections."""
+        container = QWidget()
+        outer = QVBoxLayout(container)
+        hint = QLabel(
+            "Only SOI registry-specific columns are shown here. Values sourced from ISO metadata "
+            "are grey and read-only unless 'Unlock auto-derived fields' is checked."
+        )
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        form = QFormLayout(body)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.soi_inventory_widgets = {}
+        multiline_headers = {"ORIGINAL SOURCE", "RIGHTS", "DATA PHYSICAL LOCATION", "REMARKS"}
+        for header in SOI_INVENTORY_HEADERS:
+            if header == "SlNO":
+                note = QLabel("Assigned automatically during inventory save")
+                note.setStyleSheet("color:#607d8b;")
+                form.addRow(QLabel(header), note)
+                continue
+            widget = QTextEdit() if header in multiline_headers else QLineEdit()
+            if isinstance(widget, QTextEdit):
+                widget.setMinimumHeight(60)
+            widget.setToolTip("Stored in Excel registry column: " + header)
+            self.soi_inventory_widgets[header] = widget
+            form.addRow(QLabel(header), widget)
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
         self.tabs.addTab(container, "SOI Inventory")
-
-
 
     def set_soi_inventory_field(self, header, value, overwrite=False):
 
@@ -4784,136 +4588,41 @@ class SOIMetadataDialog(QDialog):
 
 
     def populate_soi_inventory_defaults(self, metadata=None, layer=None, source_path="", overwrite=False):
-
-        """Pre-fill SOI inventory fields from selected dataset and currently filled ISO fields."""
-
+        """Fill reduced inventory fields from ISO values and the selected dataset."""
         metadata = metadata or getattr(self, "current_raster_metadata", {}) or {}
-
-        if not source_path:
-
-            source_path = metadata.get("file_path", "")
-
-        if not source_path and hasattr(self, "interop_widgets") and "DatasetStoragePath" in self.interop_widgets:
-
+        source_path = source_path or metadata.get("file_path", "")
+        if not source_path and hasattr(self, "interop_widgets"):
             source_path = self.interop_widgets["DatasetStoragePath"].text()
 
-
-
         def g(label):
-
             return self.get_field_by_label(label)
 
-
-
-        citation_date = g("citation · date") or g("dateInfo · date") or today_iso()
-
-        year = extract_year(citation_date)
-
-
-
-        layer_type = metadata.get("layer_type", "")
-
-        data_type = "VECTOR" if layer_type == "Vector" else "RASTER" if layer_type == "Raster" else ""
-
-        fmt = g("distributionFormat · name") or metadata.get("format_name", "")
-
-        file_name = g("File name") or metadata.get("File name", "") or os.path.basename(source_path)
-
-
-
+        layer_type = safe_text(metadata.get("layer_type"))
+        responsible_party = (
+            g("pointOfContact · party · organisation name")
+            or g("contact · party name")
+            or g("pointOfContact · party · individual name")
+        )
+        citation_date = g("citation · date")
         defaults = {
-
-            "DATASET TITLE": g("metadataIdentifier · code") or g("citation · identifier · code") or os.path.splitext(file_name)[0],
-
-            "NAME OF THE DATA": g("citation · title") or file_name,
-
-            "KEYWORDS": "; ".join([x for x in [g("keyword · theme"), g("keyword · place"), g("keyword · product"), g("keyword · discipline")] if x]),
-
-            "ACCESS CONSTRAINTS": g("accessConstraints"),
-
-            "USE CONSTRAINTS": g("useConstraints"),
-
-            "DATA TYPE": data_type,
-
-            "METADATA STANDARD VERSION": g("metadataStandard · edition") or g("metadataStandard · title"),
-
-            "AVAILABILITY": "YES",
-
-            "DQ TOPOLOGICAL CONSISTENCY": g("report · DQ_TopologicalConsistency · result · statement"),
-
-            "DATA PREPARED BY": g("contact · party name") or g("pointOfContact · party · organisation name"),
-
+            "DATASET TITLE": g("citation · title"),
+            "NAME OF THE DATA": g("File name") or metadata.get("File name", "") or os.path.basename(split_qgis_source(source_path)[0]),
+            "DATA TYPE": "VECTOR" if layer_type.lower() == "vector" else "RASTER" if layer_type.lower() == "raster" else layer_type.upper(),
+            "DATASET RESPONSIBLE PARTY": responsible_party,
             "ORIGINAL SOURCE": g("resourceLineage · statement"),
-
-            "SURVEY SCALE ": g("spatialResolution · equivalentScale"),
-
-            "SURVEY  YEAR": year,
-
-            "CONTOUR INTERVAL ": "",
-
-            "DIGITISATION/FAIR MAPPING OFFICE": g("contact · party name") or g("pointOfContact · party · organisation name"),
-
-            "PUBLICATION YEAR": year,
-
-            "CONTACT PERSON ": g("pointOfContact · party · individual name") or g("pointOfContact · party · positionName") or g("contact · role"),
-
-            "OFFICE AND ORGANISATION NAME": g("pointOfContact · party · organisation name") or g("contact · party name"),
-
-            "CONTACT TELEPHONE": g("pointOfContact · voice"),
-
-            "CONTACT EMAIL": g("pointOfContact · electronicMailAddress") or g("contact · electronicMailAddress"),
-
-            "X_MINIMUM": g("geographicElement · westBoundLongitude"),
-
-            "X_MAXIMUM": g("geographicElement · eastBoundLongitude"),
-
-            "Y_MINIMUM": g("geographicElement · southBoundLatitude"),
-
-            "Y_MAXIMUM": g("geographicElement · northBoundLatitude"),
-
-            "SPATIAL RESOLUTION/ACCURACY": g("spatialResolution · distance (GSD)") or g("report · DQ_AbsoluteExternalPositionalAccuracy · result · statement"),
-
-            "SPATIAL GEOREFERENCE": "YES" if g("Horizontal CRS · code") else "",
-
-            "GEOGRAPHIC DESCRIPTION": g("extent · description"),
-
-            "NAME OF PROJECTION": g("Horizontal CRS · code"),
-
-            "UNIT PROJECTION PARAMETERS": g("CRS description / notes"),
-
-            "DATA FORMAT": fmt,
-
-            "DATA FILE SIZE": file_size_mb(self.clean_source_for_filesystem(source_path)),
-
-            "DATA PHYSICAL LOCATION": source_path,
-
-            "DATASET RESPONSIBLE PARTY": g("pointOfContact · party · organisation name") or g("contact · party name"),
-
-            "DISTRIBUTION FORMAT": g("distributionFormat · name") or fmt,
-
-            "LANGUAGE": "ENGLISH",
-
-            "FILE FORMAT": g("distributionFormat · name") or fmt,
-
-            "SPATIAL RESOLUTION": g("spatialResolution · distance (GSD)"),
-
-            "SPATIAL RESOLUTION UNIT": "METERS" if g("spatialResolution · distance (GSD)") else "",
-
-            "NUMBER OF BANDS": metadata.get("bands", ""),
-
+            "SURVEY SCALE": g("spatialResolution · equivalentScale"),
+            "SURVEY YEAR": extract_year(citation_date),
+            "PUBLICATION YEAR": extract_year(citation_date),
+            "AVAILABILITY": "YES",
+            "LANGUAGE": g("defaultLocale · language") or "English",
             "RIGHTS": g("useLimitation") or g("otherConstraints"),
-
-            "METADAT DATE AND STAMP": now_iso(),
-
+            "DISTRIBUTION FORMAT": g("distributionFormat · name"),
+            "METADATA DATE STAMP": g("dateInfo · date"),
+            "DATA PHYSICAL LOCATION": source_path,
         }
-
         for header, value in defaults.items():
-
-            self.set_soi_inventory_field(header, value, overwrite=overwrite)
-
-
-
-
+            self.set_soi_inventory_field(header, value, overwrite=overwrite or header in AUTO_DERIVED_INVENTORY_HEADERS)
+        self.apply_readonly_rules()
 
     def clear_soi_inventory_fields(self):
 
@@ -5401,11 +5110,11 @@ class SOIMetadataDialog(QDialog):
 
             return
 
-        current = safe_text(self.interop_widgets["InventoryCSVPath"].text())
+        current = safe_text(self.interop_widgets["InventoryExcelPath"].text())
 
         if not current:
 
-            self.interop_widgets["InventoryCSVPath"].setText(self.fixed_inventory_default_path())
+            self.interop_widgets["InventoryExcelPath"].setText(self.fixed_inventory_default_path())
 
 
 
@@ -5417,9 +5126,9 @@ class SOIMetadataDialog(QDialog):
 
             return
 
-        if not safe_text(self.interop_widgets["InventoryCSVPath"].text()):
+        if not safe_text(self.interop_widgets["InventoryExcelPath"].text()):
 
-            self.interop_widgets["InventoryCSVPath"].setText(self.fixed_inventory_default_path())
+            self.interop_widgets["InventoryExcelPath"].setText(self.fixed_inventory_default_path())
 
         self.ensure_inventory_file_exists(show_message=False)
 
@@ -5465,11 +5174,11 @@ class SOIMetadataDialog(QDialog):
 
             inventory_path = self.normalize_inventory_path(
 
-                self.interop_widgets["InventoryCSVPath"].text().strip()
+                self.interop_widgets["InventoryExcelPath"].text().strip()
 
             )
 
-            self.interop_widgets["InventoryCSVPath"].setText(inventory_path)
+            self.interop_widgets["InventoryExcelPath"].setText(inventory_path)
 
             QSettings().setValue("SOI_MetadataGenerator/fixed_inventory_path", inventory_path)
 
@@ -5559,7 +5268,7 @@ class SOIMetadataDialog(QDialog):
 
         inventory_path = self.normalize_inventory_path(
 
-            self.interop_widgets["InventoryCSVPath"].text().strip()
+            self.interop_widgets["InventoryExcelPath"].text().strip()
 
         )
 
@@ -5792,7 +5501,7 @@ class SOIMetadataDialog(QDialog):
 
 
 
-    def browse_inventory_csv(self):
+    def browse_inventory_excel(self):
 
         file_path, _ = QFileDialog.getSaveFileName(
 
@@ -5800,7 +5509,7 @@ class SOIMetadataDialog(QDialog):
 
             "Select Metadata Inventory Excel",
 
-            self.interop_widgets["InventoryCSVPath"].text() or "metadata_inventory_register.xlsx",
+            self.interop_widgets["InventoryExcelPath"].text() or "metadata_inventory_register.xlsx",
 
             "Excel Files (*.xlsx)"
 
@@ -5810,7 +5519,7 @@ class SOIMetadataDialog(QDialog):
 
             file_path = self.normalize_inventory_path(file_path)
 
-            self.interop_widgets["InventoryCSVPath"].setText(file_path)
+            self.interop_widgets["InventoryExcelPath"].setText(file_path)
 
             QSettings().setValue("SOI_MetadataGenerator/fixed_inventory_path", file_path)
 
@@ -5866,7 +5575,7 @@ class SOIMetadataDialog(QDialog):
 
         try:
 
-            xml_values, xml_interop = read_metadata_xml_values(xml_path)
+            xml_values, xml_interop, xml_inventory = read_metadata_xml_values(xml_path)
 
         except Exception as exc:
 
@@ -5876,7 +5585,7 @@ class SOIMetadataDialog(QDialog):
 
 
 
-        if not xml_values and not xml_interop:
+        if not xml_values and not xml_interop and not xml_inventory:
 
             QMessageBox.warning(
 
@@ -5933,10 +5642,14 @@ class SOIMetadataDialog(QDialog):
 
 
         for key, value in xml_interop.items():
-
+            if key == "InventoryCSVPath":
+                key = "InventoryExcelPath"
             if key in self.interop_widgets and safe_text(value):
-
                 self.interop_widgets[key].setText(safe_text(value))
+
+
+        for key, value in xml_inventory.items():
+            self.set_soi_inventory_field(key, value, overwrite=True)
 
         self.interop_widgets["MetadataXMLPath"].setText(xml_path)
 
@@ -5969,330 +5682,32 @@ class SOIMetadataDialog(QDialog):
 
 
     def build_inventory_row_from_gui(self, xml_path=""):
-
-        try:
-
-            layer, selected_source = self.current_selected_layer_or_path()
-
-        except Exception:
-
-            layer, selected_source = None, ""
-
-
-
-        raster_path = selected_source or self.interop_widgets["DatasetStoragePath"].text().strip() or self.raster_path_edit.text().strip()
-
-        xml_path = xml_path or self.interop_widgets["MetadataXMLPath"].text().strip()
-
-        metadata = getattr(self, "current_raster_metadata", {}) or {}
-
-        clean_path = self.clean_source_for_filesystem(raster_path)
-
-
-
-        def g(label):
-
-            return self.get_field_by_label(label)
-
-
-
-        def inv(header, default=""):
-
-            manual = self.get_soi_inventory_value(header)
-
-            return manual if safe_text(manual) else default
-
-
-
-        citation_date = g("citation · date") or g("dateInfo · date") or today_iso()
-
-        year = extract_year(citation_date)
-
-        file_name = g("File name") or metadata.get("File name", "") or os.path.basename(clean_path or raster_path)
-
-        dataset_id = g("metadataIdentifier · code") or g("citation · identifier · code")
-
-        if not dataset_id:
-
-            dataset_id = str(uuid.uuid4())
-
-
-
-        title = g("citation · title") or g("Brief description") or file_name
-
-        org = g("pointOfContact · party · organisation name") or g("contact · party name")
-
-        email = g("pointOfContact · electronicMailAddress") or g("contact · electronicMailAddress")
-
-        fmt = g("distributionFormat · name") or metadata.get("format_name", "")
-
-        layer_type = metadata.get("layer_type", "")
-
-        if not layer_type and g("spatialRepresentationType") == "vector":
-
-            layer_type = "Vector"
-
-        elif not layer_type and g("spatialRepresentationType") == "grid":
-
-            layer_type = "Raster"
-
-        data_type = "VECTOR" if layer_type == "Vector" else "RASTER" if layer_type == "Raster" else ""
-
-        layer_name_for_key = ""
-
-        try:
-
-            layer_name_for_key = layer.name() if layer is not None else self.interop_widgets["QGISLayerName"].text()
-
-        except Exception:
-
-            layer_name_for_key = self.interop_widgets["QGISLayerName"].text()
-
-        ds_key = canonical_dataset_key(raster_path, layer_name_for_key)
-
-        ds_hash = dataset_hash(raster_path, layer_name_for_key)
-
-
-
-        keyword_value = "; ".join([x for x in [
-
-            g("keyword · theme"),
-
-            g("keyword · place"),
-
-            g("keyword · product"),
-
-            g("keyword · discipline"),
-
-            g("KEYWORDS") if self.field_lookup.get("KEYWORDS") else "",
-
-        ] if safe_text(x)])
-
-
-
-        # SOI inventory row in the same column structure as the sample SOI inventory form.
-
-        row = {
-
-            "SlNO": inv("SlNO", ""),
-
-            # ISO citation title is the master value; do not maintain a second editable title.
-
-            "DATASET TITLE": title,
-
-            "NAME OF THE DATA": inv("NAME OF THE DATA", title),
-
-            "KEYWORDS": inv("KEYWORDS", keyword_value),
-
-            "ACCESS CONSTRAINTS": inv("ACCESS CONSTRAINTS", g("accessConstraints")),
-
-            "USE CONSTRAINTS": inv("USE CONSTRAINTS", g("useConstraints")),
-
-            "DATA TYPE": inv("DATA TYPE", data_type),
-
-            "METADATA STANDARD VERSION": inv("METADATA STANDARD VERSION", g("metadataStandard · edition") or g("metadataStandard · title")),
-
-            "AVAILABILITY": inv("AVAILABILITY", "YES"),
-
-            "DQ TOPOLOGICAL CONSISTENCY": inv("DQ TOPOLOGICAL CONSISTENCY", g("report · DQ_TopologicalConsistency · result · statement")),
-
-            "DATA PREPARED BY": inv("DATA PREPARED BY", org),
-
-            "ORIGINAL SOURCE": inv("ORIGINAL SOURCE", g("resourceLineage · statement")),
-
-            "SURVEY SCALE ": inv("SURVEY SCALE ", g("spatialResolution · equivalentScale")),
-
-            "SURVEY  YEAR": inv("SURVEY  YEAR", year),
-
-            "CONTOUR INTERVAL ": inv("CONTOUR INTERVAL ", ""),
-
-            "DIGITISATION/FAIR MAPPING OFFICE": inv("DIGITISATION/FAIR MAPPING OFFICE", org),
-
-            "PUBLICATION YEAR": inv("PUBLICATION YEAR", year),
-
-            "CONTACT PERSON ": inv("CONTACT PERSON ", g("pointOfContact · party · individual name") or g("pointOfContact · party · positionName") or g("contact · role")),
-
-            "OFFICE AND ORGANISATION NAME": inv("OFFICE AND ORGANISATION NAME", org),
-
-            "MAILING ADDRESS": inv("MAILING ADDRESS", ""),
-
-            "CITY": inv("CITY", ""),
-
-            "COUNTRY": inv("COUNTRY", "INDIA"),
-
-            "CONTACT TELEPHONE": inv("CONTACT TELEPHONE", g("pointOfContact · voice")),
-
-            "CONTACT FAX": inv("CONTACT FAX", ""),
-
-            "CONTACT EMAIL": inv("CONTACT EMAIL", email),
-
-            "X_MINIMUM": inv("X_MINIMUM", g("geographicElement · westBoundLongitude")),
-
-            "X_MAXIMUM": inv("X_MAXIMUM", g("geographicElement · eastBoundLongitude")),
-
-            "Y_MINIMUM": inv("Y_MINIMUM", g("geographicElement · southBoundLatitude")),
-
-            "Y_MAXIMUM": inv("Y_MAXIMUM", g("geographicElement · northBoundLatitude")),
-
-            "SPATIAL RESOLUTION/ACCURACY": inv("SPATIAL RESOLUTION/ACCURACY", g("spatialResolution · distance (GSD)") or g("report · DQ_AbsoluteExternalPositionalAccuracy · result · statement")),
-
-            "SPATIAL GEOREFERENCE": inv("SPATIAL GEOREFERENCE", "YES" if g("Horizontal CRS · code") else ""),
-
-            "GEOGRAPHIC DESCRIPTION": inv("GEOGRAPHIC DESCRIPTION", g("extent · description")),
-
-            "NAME OF PROJECTION": inv("NAME OF PROJECTION", g("Horizontal CRS · code")),
-
-            "UNIT PROJECTION PARAMETERS": inv("UNIT PROJECTION PARAMETERS", g("CRS description / notes")),
-
-            "DATA FORMAT": inv("DATA FORMAT", fmt),
-
-            "DATA FILE SIZE": inv("DATA FILE SIZE", file_size_mb(clean_path)),
-
-            "DATA PHYSICAL LOCATION": inv("DATA PHYSICAL LOCATION", raster_path),
-
-            "DATASET RESPONSIBLE PARTY": inv("DATASET RESPONSIBLE PARTY", org),
-
-            "DISTRIBUTION FORMAT": inv("DISTRIBUTION FORMAT", g("distributionFormat · name") or fmt),
-
-            "LANGUAGE": inv("LANGUAGE", "ENGLISH"),
-
-            "NAME OF THE SATELLITE": inv("NAME OF THE SATELLITE", ""),
-
-            "SENSOR": inv("SENSOR", ""),
-
-            "IMAGE ACQUIRED FROM": inv("IMAGE ACQUIRED FROM", ""),
-
-            "DATE AND TIME OF IMAGE": inv("DATE AND TIME OF IMAGE", ""),
-
-            "FILE FORMAT": inv("FILE FORMAT", g("distributionFormat · name") or fmt),
-
-            "BITS PER PIXEL ": inv("BITS PER PIXEL ", ""),
-
-            "SPATIAL RESOLUTION": inv("SPATIAL RESOLUTION", g("spatialResolution · distance (GSD)")),
-
-            "SPATIAL RESOLUTION UNIT": inv("SPATIAL RESOLUTION UNIT", "METERS" if g("spatialResolution · distance (GSD)") else ""),
-
-            "NUMBER OF BANDS": inv("NUMBER OF BANDS", metadata.get("bands", "")),
-
-            "RIGHTS": inv("RIGHTS", g("useLimitation") or g("otherConstraints")),
-
-            "METADAT DATE AND STAMP": inv("METADAT DATE AND STAMP", now_iso()),
-
-        }
-
-
-
-        # Internal/system tracking fields for cross-platform metadata governance.
-
+        """Build only the reduced SOI columns plus technical match columns."""
+        layer, selected_source = self.current_selected_layer_or_path()
+        data_path = selected_source or self.interop_widgets["DatasetStoragePath"].text().strip()
+        layer_name = layer.name() if layer is not None and layer.isValid() else self.interop_widgets["QGISLayerName"].text().strip()
+        self.populate_soi_inventory_defaults(
+            metadata=getattr(self, "current_raster_metadata", {}),
+            layer=layer,
+            source_path=data_path,
+            overwrite=False,
+        )
+
+        row = {header: self.get_soi_inventory_value(header) for header in SOI_INVENTORY_HEADERS if header != "SlNO"}
+        dataset_id = self.get_field_by_label("metadataIdentifier · code")
+        key = canonical_dataset_key(data_path, layer_name)
         row.update({
-
-            "Dataset_GUID": dataset_id,
-
-            "Dataset_Hash": ds_hash,
-
-            "Dataset_Name": title,
-
-            "Dataset_Source": raster_path,
-
-            "Layer_Name": source_layer_name(raster_path, layer_name_for_key),
-
-            "Dataset_Path": raster_path,
-
-            "XML_Path": xml_path,
-
-            "Last_Modified": now_iso(),
-
-            # Legacy aliases retained while existing inventories migrate.
-
+            "Dataset_Key": key,
+            "Dataset_Hash": hashlib.sha1(key.encode("utf-8")).hexdigest() if key else "",
             "Dataset_ID": dataset_id,
-
-            "Dataset_Key": ds_key,
-
-            "Dataset_Title": title,
-
-            "File_Name": file_name,
-
-            "Data_Path": raster_path,
-
-            "Metadata_XML_Path": xml_path,
-
-            "Metadata_Date": today_iso(),
-
-            "CRS": g("Horizontal CRS · code"),
-
-            "West": g("geographicElement · westBoundLongitude"),
-
-            "East": g("geographicElement · eastBoundLongitude"),
-
-            "South": g("geographicElement · southBoundLatitude"),
-
-            "North": g("geographicElement · northBoundLatitude"),
-
-            "QGIS_Project": self.interop_widgets["QGISLayerName"].text(),
-
-            "ArcGIS_Pro_Project": self.interop_widgets["ArcGISProItemName"].text(),
-
-            "GeoServer_Workspace": self.interop_widgets["GeoServerWorkspace"].text(),
-
-            "GeoServer_Store": self.interop_widgets["GeoServerStore"].text(),
-
-            "GeoServer_Layer": self.interop_widgets["GeoServerLayer"].text(),
-
-            "ArcGIS_Server_Service": self.interop_widgets["ArcGISServerService"].text(),
-
-            "ArcGIS_Online_Item_ID": self.interop_widgets["ArcGISOnlineItemID"].text(),
-
-            "Data_Owner_Department": org,
-
-            "Contact_Email": email,
-
-            "Security_Classification": g("classification"),
-
-            "Dataset_File_Size_MB": file_size_mb(clean_path),
-
-            "Dataset_Modified_Time": file_modified_iso(clean_path),
-
+            "Data_Path": data_path,
+            "Metadata_XML_Path": xml_path or self.interop_widgets["MetadataXMLPath"].text().strip(),
+            "Layer_Name": layer_name,
+            "Dataset_Modified_Time": file_modified_iso(self.clean_source_for_filesystem(data_path)),
             "Metadata_XML_Modified_Time": file_modified_iso(xml_path),
-
-            "Remarks": "Added/updated from QGIS SOI ISO metadata generator",
-
+            "Last_Modified": now_iso(),
         })
-
-
-
-        # Fill every ISO GUI field into the inventory as separate columns.
-
-        for field in SOI_TEMPLATE_FIELDS:
-
-            fid = field.get("id")
-
-            label = field.get("label")
-
-            if fid in self.widgets and label:
-
-                row[label] = self.get_widget_value(self.widgets[fid])
-
-
-
-        # Also store interoperability tab values as columns.
-
-        for key, widget in self.interop_widgets.items():
-
-            row[f"Interop_{key}"] = self.get_widget_value(widget)
-
-
-
-        # Also store SOI inventory manual overrides separately for traceability.
-
-        for key, widget in getattr(self, "soi_inventory_widgets", {}).items():
-
-            row[f"SOI_{key}"] = self.get_widget_value(widget)
-
-
-
         return row
-
-
 
     def add_or_update_inventory_from_existing_xml(self):
 
@@ -6312,9 +5727,9 @@ class SOIMetadataDialog(QDialog):
 
 
 
-        inventory_path = self.normalize_inventory_path(self.interop_widgets["InventoryCSVPath"].text().strip())
+        inventory_path = self.normalize_inventory_path(self.interop_widgets["InventoryExcelPath"].text().strip())
 
-        self.interop_widgets["InventoryCSVPath"].setText(inventory_path)
+        self.interop_widgets["InventoryExcelPath"].setText(inventory_path)
 
         QSettings().setValue("SOI_MetadataGenerator/fixed_inventory_path", inventory_path)
 
@@ -6340,7 +5755,7 @@ class SOIMetadataDialog(QDialog):
 
             action, inventory_path, excel_row, total_records = upsert_inventory_xlsx(inventory_path, row)
 
-            self.interop_widgets["InventoryCSVPath"].setText(inventory_path)
+            self.interop_widgets["InventoryExcelPath"].setText(inventory_path)
 
             QMessageBox.information(
 
@@ -6360,7 +5775,7 @@ class SOIMetadataDialog(QDialog):
 
     def check_existing_inventory_for_selected_dataset(self, show_no_record=False, silent=False):
 
-        inventory_path = self.interop_widgets["InventoryCSVPath"].text().strip()
+        inventory_path = self.interop_widgets["InventoryExcelPath"].text().strip()
 
         try:
 
@@ -6522,7 +5937,7 @@ class SOIMetadataDialog(QDialog):
 
         try:
 
-            xml_values, _ = read_metadata_xml_values(xml_path)
+            xml_values, _, _ = read_metadata_xml_values(xml_path)
 
         except Exception as exc:
 
@@ -6719,6 +6134,20 @@ class SOIMetadataDialog(QDialog):
                     widget.setStyleSheet("background-color:#ffffff; color:#111111; border:1px solid #b0bec5; border-radius:4px; padding:5px;")
 
 
+
+
+        for header, widget in getattr(self, "soi_inventory_widgets", {}).items():
+            is_auto = header in AUTO_DERIVED_INVENTORY_HEADERS
+            read_only = is_auto and not unlock
+            if isinstance(widget, QTextEdit):
+                widget.setReadOnly(read_only)
+            else:
+                widget.setReadOnly(read_only)
+            widget.setStyleSheet(
+                "background-color:#eeeeee; color:#555555; border:1px solid #b0bec5; border-radius:4px; padding:5px;"
+                if read_only else
+                "background-color:#ffffff; color:#111111; border:1px solid #b0bec5; border-radius:4px; padding:5px;"
+            )
 
     def extract_and_fill(self, show_message=True):
 
@@ -6924,6 +6353,16 @@ class SOIMetadataDialog(QDialog):
 
 
 
+    def generate_xml_and_update_inventory(self, checked=False):
+        """Qt slot for the combined action; ignore QPushButton's checked value."""
+        del checked
+        self.generate_xml_and_inventory(update_inventory=True)
+
+    def generate_xml_only(self, checked=False):
+        """Qt slot for XML-only generation; ignore QPushButton's checked value."""
+        del checked
+        self.generate_xml_and_inventory(update_inventory=False)
+
     def generate_xml_and_inventory(self, update_inventory=True):
 
         missing = self.validate_required_fields()
@@ -7004,6 +6443,12 @@ class SOIMetadataDialog(QDialog):
 
 
 
+        self.populate_soi_inventory_defaults(
+            metadata=getattr(self, "current_raster_metadata", {}),
+            layer=layer,
+            source_path=source_path,
+            overwrite=False,
+        )
         values = self.collect_values()
 
         values["_interop"]["DatasetStoragePath"] = source_path
@@ -7034,9 +6479,9 @@ class SOIMetadataDialog(QDialog):
 
             if not inventory_path:
 
-                inventory_path = self.normalize_inventory_path(self.interop_widgets["InventoryCSVPath"].text().strip())
+                inventory_path = self.normalize_inventory_path(self.interop_widgets["InventoryExcelPath"].text().strip())
 
-            self.interop_widgets["InventoryCSVPath"].setText(inventory_path)
+            self.interop_widgets["InventoryExcelPath"].setText(inventory_path)
 
             QSettings().setValue("SOI_MetadataGenerator/fixed_inventory_path", inventory_path)
 
@@ -7066,23 +6511,18 @@ class SOIMetadataDialog(QDialog):
 
             row = self.build_inventory_row_from_gui(xml_path=output_xml_path)
 
-            row["Dataset_GUID"] = dataset_id
 
             row["Dataset_ID"] = dataset_id
 
-            row["Dataset_Source"] = source_path
 
-            row["Dataset_Path"] = source_path
 
             row["Data_Path"] = source_path
 
-            row["XML_Path"] = output_xml_path
 
             row["Metadata_XML_Path"] = output_xml_path
 
             row["Last_Modified"] = now_iso()
 
-            row["Dataset_File_Size_MB"] = file_size_mb(self.clean_source_for_filesystem(source_path))
 
             row["Dataset_Modified_Time"] = file_modified_iso(self.clean_source_for_filesystem(source_path))
 
@@ -7094,7 +6534,7 @@ class SOIMetadataDialog(QDialog):
 
                 action, inventory_path, excel_row, total_records = upsert_inventory_xlsx(inventory_path, row)
 
-                self.interop_widgets["InventoryCSVPath"].setText(inventory_path)
+                self.interop_widgets["InventoryExcelPath"].setText(inventory_path)
 
                 self.set_status(f"Inventory {action}; Excel row {excel_row}; metadata registered", True)
 

@@ -4275,13 +4275,17 @@ class SOIMetadataDialog(QDialog):
 
         save_xml_btn = QPushButton("Generate ISO XML + Update Inventory")
 
-        save_xml_btn.clicked.connect(self.generate_xml_and_inventory)
+        # QPushButton.clicked emits a boolean ``checked`` argument. Connecting it
+        # directly to generate_xml_and_inventory(update_inventory=True) replaces
+        # that default with False for a normal button click, silently selecting
+        # the XML-only path. Route both buttons through explicit slots instead.
+        save_xml_btn.clicked.connect(self.generate_xml_and_update_inventory)
 
 
 
         save_xml_only_btn = QPushButton("Generate ISO XML Only")
 
-        save_xml_only_btn.clicked.connect(lambda: self.generate_xml_and_inventory(update_inventory=False))
+        save_xml_only_btn.clicked.connect(self.generate_xml_only)
 
 
 
@@ -6348,6 +6352,16 @@ class SOIMetadataDialog(QDialog):
         return values
 
 
+
+    def generate_xml_and_update_inventory(self, checked=False):
+        """Qt slot for the combined action; ignore QPushButton's checked value."""
+        del checked
+        self.generate_xml_and_inventory(update_inventory=True)
+
+    def generate_xml_only(self, checked=False):
+        """Qt slot for XML-only generation; ignore QPushButton's checked value."""
+        del checked
+        self.generate_xml_and_inventory(update_inventory=False)
 
     def generate_xml_and_inventory(self, update_inventory=True):
 
